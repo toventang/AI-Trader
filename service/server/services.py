@@ -5,7 +5,7 @@ Services Module
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from database import get_db_connection
 
@@ -44,10 +44,10 @@ def _get_user_by_token(token: str) -> Optional[Dict]:
 def _create_user_session(user_id: int) -> str:
     """Create a new session for user."""
     import secrets
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     token = secrets.token_urlsafe(32)
-    expires_at = (datetime.now() + timedelta(days=7)).isoformat()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat().replace("+00:00", "Z")
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -140,6 +140,10 @@ def _update_position_from_signal(agent_id: int, symbol: str, market: str, action
     position_id = row["id"] if row else None
 
     action_lower = action.lower()
+
+    # Polymarket is spot-like paper trading: no naked shorts.
+    if market == "polymarket" and action_lower in ("short", "cover"):
+        raise ValueError("Polymarket does not support short/cover; use buy/sell of outcome tokens instead")
 
     if action_lower == "buy":
         # Increase long position
