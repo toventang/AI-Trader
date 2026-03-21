@@ -12,9 +12,56 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, Dict, Any, List
 import math
 import json
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
+
+GROUPED_SIGNALS_CACHE_TTL_SECONDS = 30
+AGENT_SIGNALS_CACHE_TTL_SECONDS = 15
+grouped_signals_cache: dict[tuple[str, str, int, int], tuple[float, dict[str, Any]]] = {}
+agent_signals_cache: dict[tuple[int, str, int], tuple[float, dict[str, Any]]] = {}
+
+
+def _format_polymarket_reference(reference: str) -> str:
+    ref = (reference or "").strip()
+    if not ref:
+        return ""
+    if ref.startswith("0x") or ref.isdigit():
+        return ref
+    return ref.replace("-", " ")
+
+
+def _decorate_polymarket_item(item: dict, fetch_remote: bool = False) -> dict:
+    if item.get("market") != "polymarket":
+        return item
+
+    description = None
+    if fetch_remote:
+        try:
+            from price_fetcher import describe_polymarket_contract
+
+            description = describe_polymarket_contract(
+                item.get("symbol") or "",
+                token_id=item.get("token_id"),
+                outcome=item.get("outcome"),
+            )
+        except Exception:
+            description = None
+
+    if not description:
+        fallback = _format_polymarket_reference(item.get("symbol") or "")
+        outcome = item.get("outcome")
+        item["display_title"] = f"{fallback} [{outcome}]" if fallback and outcome else fallback
+        item["market_title"] = fallback or (item.get("symbol") or "")
+        return item
+
+    item["token_id"] = item.get("token_id") or description.get("token_id")
+    item["outcome"] = item.get("outcome") or description.get("outcome")
+    item["market_title"] = description.get("market_title")
+    item["market_slug"] = description.get("market_slug")
+    item["display_title"] = description.get("display_title")
+    return item
 
 # Rate limiting for price API
 price_api_last_request: dict[int, float] = {}  # agent_id -> timestamp
@@ -32,6 +79,8 @@ DISCUSSION_WINDOW_LIMIT = 5
 REPLY_WINDOW_LIMIT = 10
 CONTENT_DUPLICATE_WINDOW_SECONDS = 1800
 content_rate_limit_state: dict[tuple[int, str], dict[str, Any]] = {}
+MENTION_PATTERN = re.compile(r"@([A-Za-z0-9_\-]{2,64})")
+ACCEPT_REPLY_REWARD = 3
 
 def _clamp_profit_for_display(profit: float) -> float:
     if profit is None:
@@ -58,6 +107,15 @@ def check_price_api_rate_limit(agent_id: int) -> bool:
 def _utc_now_iso_z() -> str:
     """Return current time as ISO 8601 UTC with Z suffix."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _extract_mentions(content: str) -> list[str]:
+    seen = set()
+    for match in MENTION_PATTERN.findall(content or ""):
+        normalized = match.strip()
+        if normalized:
+            seen.add(normalized)
+    return list(seen)
 
 
 def _normalize_content_fingerprint(content: str) -> str:
@@ -111,7 +169,7 @@ def _enforce_content_rate_limit(agent_id: int, action: str, content: str, target
 from config import CORS_ORIGINS, SIGNAL_PUBLISH_REWARD, SIGNAL_ADOPT_REWARD, DISCUSSION_PUBLISH_REWARD, REPLY_PUBLISH_REWARD
 from database import get_db_connection
 from utils import hash_password, verify_password, generate_verification_code, cleanup_expired_tokens, validate_address, _extract_token
-from services import _get_agent_by_token, _get_user_by_token, _create_user_session, _add_agent_points, _get_agent_points, _get_next_signal_id, _update_position_from_signal, _broadcast_signal_to_followers
+from services import _get_agent_by_token, _get_user_by_token, _create_user_session, _add_agent_points, _get_agent_points, _reserve_signal_id, _update_position_from_signal, _broadcast_signal_to_followers
 from price_fetcher import get_price_from_market
 from zoneinfo import ZoneInfo
 
@@ -239,6 +297,8 @@ def create_app() -> FastAPI:
         quantity: float
         content: Optional[str] = None
         executed_at: str
+        token_id: Optional[str] = None
+        outcome: Optional[str] = None
 
     class StrategyRequest(BaseModel):
         market: str
@@ -441,8 +501,10 @@ def create_app() -> FastAPI:
         conn.close()
 
         counts = {row["type"]: row["count"] for row in rows}
-        discussion_unread = counts.get("discussion_started", 0) + counts.get("discussion_reply", 0)
-        strategy_unread = counts.get("strategy_published", 0) + counts.get("strategy_reply", 0)
+        discussion_types = ("discussion_started", "discussion_reply", "discussion_mention", "discussion_reply_accepted")
+        strategy_types = ("strategy_published", "strategy_reply", "strategy_mention", "strategy_reply_accepted")
+        discussion_unread = sum(counts.get(message_type, 0) for message_type in discussion_types)
+        strategy_unread = sum(counts.get(message_type, 0) for message_type in strategy_types)
 
         return {
             "discussion_unread": discussion_unread,
@@ -469,8 +531,8 @@ def create_app() -> FastAPI:
             limit = 50
 
         category_types = {
-            "discussion": ["discussion_started", "discussion_reply"],
-            "strategy": ["strategy_published", "strategy_reply"],
+            "discussion": ["discussion_started", "discussion_reply", "discussion_mention", "discussion_reply_accepted"],
+            "strategy": ["strategy_published", "strategy_reply", "strategy_mention", "strategy_reply_accepted"],
         }
 
         conn = get_db_connection()
@@ -520,8 +582,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=401, detail="Invalid token")
 
         category_types = {
-            "discussion": ["discussion_started", "discussion_reply"],
-            "strategy": ["strategy_published", "strategy_reply"],
+            "discussion": ["discussion_started", "discussion_reply", "discussion_mention", "discussion_reply_accepted"],
+            "strategy": ["strategy_published", "strategy_reply", "strategy_mention", "strategy_reply_accepted"],
         }
         message_types = []
         for category in data.categories:
@@ -570,14 +632,24 @@ def create_app() -> FastAPI:
 
     # ==================== Heartbeat ====================
 
-    class HeartbeatRequest(BaseModel):
-        agent_id: int
-
     @app.post("/api/claw/agents/heartbeat")
-    async def agent_heartbeat(data: HeartbeatRequest):
+    async def agent_heartbeat(authorization: str = Header(None)):
         """Agent heartbeat - pull messages and tasks."""
+        token = _extract_token(authorization)
+        agent = _get_agent_by_token(token)
+        if not agent:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        agent_id = agent["id"]
         conn = get_db_connection()
         cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT COUNT(*) as count
+            FROM agent_messages
+            WHERE agent_id = ? AND read = 0
+        """, (agent_id,))
+        unread_message_count = cursor.fetchone()["count"]
 
         # Get unread messages
         cursor.execute("""
@@ -585,14 +657,23 @@ def create_app() -> FastAPI:
             WHERE agent_id = ? AND read = 0
             ORDER BY created_at DESC
             LIMIT 50
-        """, (data.agent_id,))
+        """, (agent_id,))
         messages = cursor.fetchall()
+        message_ids = [row["id"] for row in messages]
 
-        # Mark messages as read
+        if message_ids:
+            placeholders = ",".join("?" for _ in message_ids)
+            cursor.execute(
+                f"UPDATE agent_messages SET read = 1 WHERE agent_id = ? AND id IN ({placeholders})",
+                (agent_id, *message_ids)
+            )
+
         cursor.execute("""
-            UPDATE agent_messages SET read = 1
-            WHERE agent_id = ? AND read = 0
-        """, (data.agent_id,))
+            SELECT COUNT(*) as count
+            FROM agent_tasks
+            WHERE agent_id = ? AND status = 'pending'
+        """, (agent_id,))
+        pending_task_count = cursor.fetchone()["count"]
 
         # Get pending tasks
         cursor.execute("""
@@ -600,37 +681,91 @@ def create_app() -> FastAPI:
             WHERE agent_id = ? AND status = 'pending'
             ORDER BY created_at ASC
             LIMIT 10
-        """, (data.agent_id,))
+        """, (agent_id,))
         tasks = cursor.fetchall()
 
         conn.commit()
         conn.close()
 
+        parsed_messages = []
+        for row in messages:
+            message = dict(row)
+            if message.get("data"):
+                try:
+                    message["data"] = json.loads(message["data"])
+                except Exception:
+                    pass
+            parsed_messages.append(message)
+
+        parsed_tasks = []
+        for row in tasks:
+            task = dict(row)
+            if task.get("input_data"):
+                try:
+                    task["input_data"] = json.loads(task["input_data"])
+                except Exception:
+                    pass
+            if task.get("result_data"):
+                try:
+                    task["result_data"] = json.loads(task["result_data"])
+                except Exception:
+                    pass
+            parsed_tasks.append(task)
+
         return {
-            "messages": [dict(m) for m in messages],
-            "tasks": [dict(t) for t in tasks]
+            "agent_id": agent_id,
+            "server_time": _utc_now_iso_z(),
+            "recommended_poll_interval_seconds": 30,
+            "messages": parsed_messages,
+            "tasks": parsed_tasks,
+            "message_count": len(parsed_messages),
+            "task_count": len(parsed_tasks),
+            "unread_count": len(parsed_messages),
+            "remaining_unread_count": max(0, unread_message_count - len(parsed_messages)),
+            "remaining_task_count": max(0, pending_task_count - len(parsed_tasks)),
+            "has_more_messages": unread_message_count > len(parsed_messages),
+            "has_more_tasks": pending_task_count > len(parsed_tasks),
         }
 
     # ==================== Serve Skill Docs ====================
 
-    @app.get("/skill.md")
-    async def get_skill_index():
-        """Serve root skill.md documentation."""
+    def _resolve_skill_path(skill_name: Optional[str] = None):
         from pathlib import Path
-        # Serve the root skill.md file
-        skill_path = Path(__file__).parent.parent.parent / "skill.md"
-        if skill_path.exists():
-            with open(skill_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            return Response(content=content, media_type="text/markdown")
-        return {"error": "skill.md not found"}
+
+        root = Path(__file__).parent.parent.parent
+        candidates = []
+        if skill_name:
+            candidates.extend([
+                root / "skills" / skill_name / "SKILL.md",
+                root / "skills" / skill_name / "skill.md",
+            ])
+        else:
+            candidates.extend([
+                root / "skills" / "ai4trade" / "SKILL.md",
+                root / "skills" / "ai4trade" / "skill.md",
+            ])
+
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+
+    @app.get("/skill.md")
+    @app.get("/SKILL.md")
+    async def get_skill_index():
+        """Serve the main skill documentation."""
+        skill_path = _resolve_skill_path()
+        if skill_path is None:
+            return {"error": "main skill doc not found"}
+        with open(skill_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return Response(content=content, media_type="text/markdown")
 
     @app.get("/skill/{skill_name}")
     async def get_skill_page(skill_name: str):
         """Serve skill documentation."""
-        from pathlib import Path
-        skill_path = Path(__file__).parent.parent.parent / "skills" / skill_name / "skill.md"
-        if skill_path.exists():
+        skill_path = _resolve_skill_path(skill_name)
+        if skill_path is not None:
             with open(skill_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             return Response(content=content, media_type="text/markdown")
@@ -639,9 +774,8 @@ def create_app() -> FastAPI:
     @app.get("/skill/{skill_name}/raw")
     async def get_skill_raw(skill_name: str):
         """Get raw skill markdown."""
-        from pathlib import Path
-        skill_path = Path(__file__).parent.parent.parent / "skills" / skill_name / "skill.md"
-        if skill_path.exists():
+        skill_path = _resolve_skill_path(skill_name)
+        if skill_path is not None:
             with open(skill_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             return content
@@ -804,11 +938,13 @@ def create_app() -> FastAPI:
 
         agent_id = agent["id"]
         agent_name = agent["name"]
-        signal_id = _get_next_signal_id()
         now = _utc_now_iso_z()
 
         # Store the actual action (buy/sell/short/cover)
         side = data.action
+        action_lower = side.lower()
+        polymarket_token_id = None
+        polymarket_outcome = None
         if data.market == "polymarket" and side.lower() in ("short", "cover"):
             raise HTTPException(status_code=400, detail="Polymarket paper trading does not support short/cover. Use buy/sell of outcome tokens instead.")
 
@@ -824,6 +960,19 @@ def create_app() -> FastAPI:
         # Prevent extreme quantities that can corrupt balances
         if qty > 1_000_000:
             raise HTTPException(status_code=400, detail="Quantity too large")
+
+        if data.market == "polymarket":
+            from price_fetcher import _polymarket_resolve_reference
+            if data.executed_at.lower() != "now":
+                raise HTTPException(status_code=400, detail="Polymarket historical pricing is not supported. Use executed_at='now'.")
+            contract = _polymarket_resolve_reference(data.symbol, token_id=data.token_id, outcome=data.outcome)
+            if not contract:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Polymarket trades require an explicit token_id or outcome that resolves to a single outcome token."
+                )
+            polymarket_token_id = contract["token_id"]
+            polymarket_outcome = contract.get("outcome")
 
         # Handle "now" - use current UTC time
         if data.executed_at.lower() == "now":
@@ -848,7 +997,13 @@ def create_app() -> FastAPI:
                     )
 
             # Fetch current price from API (will handle timezone conversion internally)
-            actual_price = get_price_from_market(data.symbol, executed_at, data.market)
+            actual_price = get_price_from_market(
+                data.symbol,
+                executed_at,
+                data.market,
+                token_id=polymarket_token_id,
+                outcome=polymarket_outcome,
+            )
             if actual_price:
                 price = actual_price
                 print(f"[Trade] Fetched price: {data.symbol} @ {executed_at} = ${price}")
@@ -870,7 +1025,13 @@ def create_app() -> FastAPI:
 
             # IMPORTANT: For historical trades, always fetch price from backend
             # to avoid trusting client-supplied prices (e.g. BTC @ 31.5).
-            actual_price = get_price_from_market(data.symbol, executed_at, data.market)
+            actual_price = get_price_from_market(
+                data.symbol,
+                executed_at,
+                data.market,
+                token_id=polymarket_token_id,
+                outcome=polymarket_outcome,
+            )
             if actual_price:
                 price = actual_price
                 print(f"[Trade] Fetched historical price: {data.symbol} @ {executed_at} = ${price}")
@@ -894,81 +1055,102 @@ def create_app() -> FastAPI:
 
         timestamp = int(datetime.fromisoformat(executed_at.replace('Z', '+00:00')).timestamp())
 
-        # Position sanity checks for sell/cover (must have sufficient position)
-        action_lower = side.lower()
-        if action_lower in ("sell", "cover"):
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT quantity FROM positions WHERE agent_id = ? AND symbol = ? AND market = ?",
-                (agent_id, data.symbol, data.market)
-            )
-            pos = cursor.fetchone()
-            conn.close()
-
-            current_qty = float(pos["quantity"]) if pos else 0.0
-            if action_lower == "sell":
-                if current_qty <= 0:
-                    raise HTTPException(status_code=400, detail="No long position to sell")
-                if qty > current_qty + 1e-12:
-                    raise HTTPException(status_code=400, detail="Insufficient long position quantity")
-            else:  # cover
-                if current_qty >= 0:
-                    raise HTTPException(status_code=400, detail="No short position to cover")
-                if qty > abs(current_qty) + 1e-12:
-                    raise HTTPException(status_code=400, detail="Insufficient short position quantity")
-
         # Prevent extreme trade value that can corrupt balances
         trade_value_guard = price * qty
         if not math.isfinite(trade_value_guard) or trade_value_guard > 1_000_000_000:
             raise HTTPException(status_code=400, detail="Trade value too large")
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO signals
-            (signal_id, agent_id, message_type, market, signal_type, symbol, side, entry_price, quantity, content, timestamp, created_at, executed_at)
-            VALUES (?, ?, 'operation', ?, 'realtime', ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (signal_id, agent_id, data.market, data.symbol, side, price, data.quantity, data.content, timestamp, now, executed_at))
-        conn.commit()
-        conn.close()
-
-        # Update position
-        _update_position_from_signal(agent_id, data.symbol, data.market, side, qty, price, executed_at)
-
-        # Update cash balance
+        signal_id = None
         from fees import TRADE_FEE_RATE
         trade_value = price * qty
         fee = trade_value * TRADE_FEE_RATE
-
         conn = get_db_connection()
         cursor = conn.cursor()
+        try:
+            cursor.execute("BEGIN IMMEDIATE")
+            signal_id = _reserve_signal_id(cursor)
 
-        # Buy/Short: deduct cash + fee; Sell/Cover: add cash - fee
-        if side in ['buy', 'short']:
-            total_deduction = trade_value + fee
-            # Check if agent has enough cash
-            cursor.execute("SELECT cash FROM agents WHERE id = ?", (agent_id,))
-            row = cursor.fetchone()
-            current_cash = row["cash"] if row else 0
+            if action_lower in ("sell", "cover"):
+                if data.market == "polymarket":
+                    cursor.execute(
+                        "SELECT quantity FROM positions WHERE agent_id = ? AND market = ? AND token_id = ?",
+                        (agent_id, data.market, polymarket_token_id)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT quantity FROM positions WHERE agent_id = ? AND symbol = ? AND market = ?",
+                        (agent_id, data.symbol, data.market)
+                    )
+                pos = cursor.fetchone()
+                current_qty = float(pos["quantity"]) if pos else 0.0
+                if action_lower == "sell":
+                    if current_qty <= 0:
+                        raise HTTPException(status_code=400, detail="No long position to sell")
+                    if qty > current_qty + 1e-12:
+                        raise HTTPException(status_code=400, detail="Insufficient long position quantity")
+                else:
+                    if current_qty >= 0:
+                        raise HTTPException(status_code=400, detail="No short position to cover")
+                    if qty > abs(current_qty) + 1e-12:
+                        raise HTTPException(status_code=400, detail="Insufficient short position quantity")
 
-            if current_cash < total_deduction:
-                conn.close()
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Insufficient cash. Required: ${total_deduction:.2f} (trade: ${trade_value:.2f} + fee: ${fee:.2f}), Available: ${current_cash:.2f}"
-                )
+            if action_lower in ["buy", "short"]:
+                total_deduction = trade_value + fee
+                cursor.execute("SELECT cash FROM agents WHERE id = ?", (agent_id,))
+                row = cursor.fetchone()
+                current_cash = row["cash"] if row else 0
+                if current_cash < total_deduction:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Insufficient cash. Required: ${total_deduction:.2f} (trade: ${trade_value:.2f} + fee: ${fee:.2f}), Available: ${current_cash:.2f}"
+                    )
 
             cursor.execute("""
-                UPDATE agents SET cash = cash - ? WHERE id = ?
-            """, (total_deduction, agent_id))
-        else:  # sell, cover
-            net_proceeds = trade_value - fee
-            cursor.execute("""
-                UPDATE agents SET cash = cash + ? WHERE id = ?
-            """, (net_proceeds, agent_id))
+                INSERT INTO signals
+                (signal_id, agent_id, message_type, market, signal_type, symbol, token_id, outcome, side, entry_price, quantity, content, timestamp, created_at, executed_at)
+                VALUES (?, ?, 'operation', ?, 'realtime', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                signal_id,
+                agent_id,
+                data.market,
+                data.symbol,
+                polymarket_token_id,
+                polymarket_outcome,
+                side,
+                price,
+                qty,
+                data.content,
+                timestamp,
+                now,
+                executed_at,
+            ))
 
-        conn.commit()
+            _update_position_from_signal(
+                agent_id,
+                data.symbol,
+                data.market,
+                side,
+                qty,
+                price,
+                executed_at,
+                cursor=cursor,
+                token_id=polymarket_token_id,
+                outcome=polymarket_outcome,
+            )
+
+            if action_lower in ['buy', 'short']:
+                cursor.execute("UPDATE agents SET cash = cash - ? WHERE id = ?", (trade_value + fee, agent_id))
+            else:
+                cursor.execute("UPDATE agents SET cash = cash + ? WHERE id = ?", (trade_value - fee, agent_id))
+
+            conn.commit()
+        except HTTPException:
+            conn.rollback()
+            conn.close()
+            raise
+        except Exception as e:
+            conn.rollback()
+            conn.close()
+            raise HTTPException(status_code=500, detail=f"Failed to record trade: {e}")
         conn.close()
 
         # Award points
@@ -980,6 +1162,7 @@ def create_app() -> FastAPI:
             # Get all followers of this agent
             conn = get_db_connection()
             cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
             cursor.execute("""
                 SELECT follower_id FROM subscriptions
                 WHERE leader_id = ? AND status = 'active'
@@ -995,7 +1178,7 @@ def create_app() -> FastAPI:
                     cursor.execute("SAVEPOINT follower_{}".format(follower_id))
 
                     # Check cash first before doing anything
-                    if side in ['buy', 'short']:
+                    if action_lower in ['buy', 'short']:
                         follower_fee = trade_value * TRADE_FEE_RATE
                         follower_total = trade_value + follower_fee
 
@@ -1015,26 +1198,42 @@ def create_app() -> FastAPI:
                         data.symbol,
                         data.market,
                         side,
-                        data.quantity,
+                        qty,
                         price,
                         executed_at,
                         leader_id=agent_id,
-                        cursor=cursor
+                        cursor=cursor,
+                        token_id=polymarket_token_id,
+                        outcome=polymarket_outcome,
                     )
 
                     # Create signal record for follower (to show in their feed)
-                    follower_signal_id = _get_next_signal_id()
+                    follower_signal_id = _reserve_signal_id(cursor)
                     # Content indicates this is a copied signal
                     leader_name = agent['name'] if isinstance(agent, dict) else 'Leader'
                     copy_content = f"[Copied from {leader_name}] {data.content or ''}"
                     cursor.execute("""
                         INSERT INTO signals
-                        (signal_id, agent_id, message_type, market, signal_type, symbol, side, entry_price, quantity, content, timestamp, created_at, executed_at)
-                        VALUES (?, ?, 'operation', ?, 'realtime', ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (follower_signal_id, follower_id, data.market, data.symbol, side, price, data.quantity, copy_content, int(datetime.now(timezone.utc).timestamp()), now, executed_at))
+                        (signal_id, agent_id, message_type, market, signal_type, symbol, token_id, outcome, side, entry_price, quantity, content, timestamp, created_at, executed_at)
+                        VALUES (?, ?, 'operation', ?, 'realtime', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        follower_signal_id,
+                        follower_id,
+                        data.market,
+                        data.symbol,
+                        polymarket_token_id,
+                        polymarket_outcome,
+                        side,
+                        price,
+                        qty,
+                        copy_content,
+                        int(datetime.now(timezone.utc).timestamp()),
+                        now,
+                        executed_at,
+                    ))
 
                     # Deduct/add cash for follower (with fee) - in same transaction
-                    if side in ['buy', 'short']:
+                    if action_lower in ['buy', 'short']:
                         follower_fee = trade_value * TRADE_FEE_RATE
                         follower_total = trade_value + follower_fee
 
@@ -1063,6 +1262,7 @@ def create_app() -> FastAPI:
                     except:
                         pass
 
+            conn.commit()
             conn.close()
             print(f"[Copy Trade] Copied signal to {follower_count} followers")
         except Exception as e:
@@ -1073,15 +1273,21 @@ def create_app() -> FastAPI:
             except:
                 pass
 
-        return {
+        payload = {
             "success": True,
             "signal_id": signal_id,
             "message_type": "operation",
             "market": data.market,
+            "symbol": data.symbol,
             "price": price,
             "follower_count": follower_count,
-            "points_earned": SIGNAL_PUBLISH_REWARD
+            "points_earned": SIGNAL_PUBLISH_REWARD,
+            "token_id": polymarket_token_id,
+            "outcome": polymarket_outcome,
         }
+        if data.market == "polymarket":
+            _decorate_polymarket_item(payload, fetch_remote=True)
+        return payload
 
     @app.post("/api/signals/strategy")
     async def upload_strategy(data: StrategyRequest, authorization: str = Header(None)):
@@ -1093,7 +1299,7 @@ def create_app() -> FastAPI:
 
         agent_id = agent["id"]
         agent_name = agent["name"]
-        signal_id = _get_next_signal_id()
+        signal_id = _reserve_signal_id()
         now = _utc_now_iso_z()
 
         conn = get_db_connection()
@@ -1136,7 +1342,7 @@ def create_app() -> FastAPI:
 
         agent_id = agent["id"]
         agent_name = agent["name"]
-        signal_id = _get_next_signal_id()
+        signal_id = _reserve_signal_id()
         now = _utc_now_iso_z()
 
         conn = get_db_connection()
@@ -1170,6 +1376,12 @@ def create_app() -> FastAPI:
         offset: int = 0
     ):
         """Get signals grouped by agent."""
+        cache_key = ((message_type or "").strip(), (market or "").strip(), max(1, limit), max(0, offset))
+        cached = grouped_signals_cache.get(cache_key)
+        now_ts = time.time()
+        if cached and now_ts - cached[0] < GROUPED_SIGNALS_CACHE_TTL_SECONDS:
+            return cached[1]
+
         conn = get_db_connection()
         cursor = conn.cursor()
 
@@ -1183,6 +1395,19 @@ def create_app() -> FastAPI:
             params.append(market)
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        count_query = f"""
+            SELECT COUNT(*) AS total FROM (
+                SELECT a.id
+                FROM agents a
+                LEFT JOIN signals s ON s.agent_id = a.id AND {where_clause}
+                GROUP BY a.id
+                HAVING COUNT(s.id) > 0
+            ) grouped_agents
+        """
+        cursor.execute(count_query, params)
+        total_row = cursor.fetchone()
+        total = total_row["total"] if total_row else 0
 
         query = f"""
             SELECT
@@ -1208,17 +1433,23 @@ def create_app() -> FastAPI:
         cursor.execute(query, params)
         rows = cursor.fetchall()
 
-        total = len(rows)
+        agent_ids = [row["agent_id"] for row in rows]
+        positions_by_agent: dict[int, list[dict[str, Any]]] = {}
+        if agent_ids:
+            placeholders = ",".join("?" for _ in agent_ids)
+            cursor.execute(f"""
+                SELECT agent_id, symbol, market, token_id, outcome, side, quantity, entry_price, current_price
+                FROM positions
+                WHERE agent_id IN ({placeholders})
+                ORDER BY opened_at DESC
+            """, agent_ids)
+            for pos_row in cursor.fetchall():
+                positions_by_agent.setdefault(pos_row["agent_id"], []).append(dict(pos_row))
+
         agents = []
         for row in rows:
             agent_id = row["agent_id"]
-
-            # Get position summary
-            cursor.execute("""
-                SELECT symbol, market, side, quantity, entry_price, current_price
-                FROM positions WHERE agent_id = ?
-            """, (agent_id,))
-            position_rows = cursor.fetchall()
+            position_rows = positions_by_agent.get(agent_id, [])
 
             position_summary = []
             total_position_pnl = 0
@@ -1235,11 +1466,15 @@ def create_app() -> FastAPI:
                 position_summary.append({
                     "symbol": pos_row["symbol"],
                     "market": pos_row["market"],
+                    "token_id": pos_row["token_id"],
+                    "outcome": pos_row["outcome"],
                     "side": pos_row["side"],
                     "quantity": pos_row["quantity"],
                     "current_price": current_price,
                     "pnl": pnl
                 })
+                if position_summary[-1]["market"] == "polymarket":
+                    _decorate_polymarket_item(position_summary[-1], fetch_remote=False)
 
             agents.append({
                 "agent_id": agent_id,
@@ -1255,7 +1490,9 @@ def create_app() -> FastAPI:
             })
 
         conn.close()
-        return {"agents": agents, "total": total}
+        payload = {"agents": agents, "total": total}
+        grouped_signals_cache[cache_key] = (now_ts, payload)
+        return payload
 
     # ==================== Signal Replies (must be before {agent_id}) ====================
 
@@ -1287,9 +1524,16 @@ def create_app() -> FastAPI:
         message_type: str = None,
         market: str = None,
         keyword: str = None,
-        limit: int = 50
+        limit: int = 50,
+        sort: str = "new",
+        authorization: str = Header(None)
     ):
         """Get signals feed (for strategies and discussions)."""
+        viewer = None
+        token = _extract_token(authorization)
+        if token:
+            viewer = _get_agent_by_token(token)
+
         conn = get_db_connection()
         cursor = conn.cursor()
 
@@ -1309,20 +1553,53 @@ def create_app() -> FastAPI:
             keyword_pattern = f"%{keyword}%"
             params.extend([keyword_pattern, keyword_pattern])
 
+        if sort == "following" and viewer:
+            conditions.append("""
+                (
+                    s.agent_id = ?
+                    OR EXISTS (
+                        SELECT 1 FROM subscriptions sub
+                        WHERE sub.leader_id = s.agent_id
+                          AND sub.follower_id = ?
+                          AND sub.status = 'active'
+                    )
+                )
+            """)
+            params.extend([viewer["id"], viewer["id"]])
+
         where_clause = " AND ".join(conditions) if conditions else "1=1"
+        if sort == "active":
+            order_clause = "COALESCE(last_reply_at, s.created_at) DESC, reply_count DESC, s.created_at DESC"
+        elif sort == "following" and viewer:
+            order_clause = "COALESCE(last_reply_at, s.created_at) DESC, reply_count DESC, s.created_at DESC"
+        else:
+            order_clause = "s.created_at DESC"
 
         query = f"""
-            SELECT s.*, a.name as agent_name
+            SELECT
+                s.*,
+                a.name as agent_name,
+                (SELECT COUNT(*) FROM signal_replies sr WHERE sr.signal_id = s.signal_id) as reply_count,
+                (SELECT MAX(sr.created_at) FROM signal_replies sr WHERE sr.signal_id = s.signal_id) as last_reply_at,
+                (SELECT COUNT(DISTINCT sr.agent_id) + 1 FROM signal_replies sr WHERE sr.signal_id = s.signal_id) as participant_count
             FROM signals s
             JOIN agents a ON a.id = s.agent_id
             WHERE {where_clause}
-            ORDER BY s.created_at DESC
+            ORDER BY {order_clause}
             LIMIT ?
         """
         params.append(limit)
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
+        followed_author_ids = set()
+        if viewer:
+            cursor.execute("""
+                SELECT leader_id
+                FROM subscriptions
+                WHERE follower_id = ? AND status = 'active'
+            """, (viewer["id"],))
+            followed_author_ids = {row["leader_id"] for row in cursor.fetchall()}
         conn.close()
 
         signals = []
@@ -1333,6 +1610,11 @@ def create_app() -> FastAPI:
                 signal_dict['symbols'] = [s.strip() for s in signal_dict['symbols'].split(',') if s.strip()]
             if signal_dict.get('tags') and isinstance(signal_dict['tags'], str):
                 signal_dict['tags'] = [t.strip() for t in signal_dict['tags'].split(',') if t.strip()]
+            if signal_dict.get("participant_count") in (None, 0):
+                signal_dict["participant_count"] = 1
+            if signal_dict.get("market") == "polymarket":
+                _decorate_polymarket_item(signal_dict, fetch_remote=False)
+            signal_dict["is_following_author"] = signal_dict["agent_id"] in followed_author_ids
             signals.append(signal_dict)
 
         return {"signals": signals}
@@ -1352,11 +1634,23 @@ def create_app() -> FastAPI:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT s.leader_id, a.name as leader_name, s.created_at
+            SELECT
+                s.leader_id,
+                a.name as leader_name,
+                s.created_at as subscribed_at,
+                (SELECT COUNT(*) FROM subscriptions sub WHERE sub.leader_id = s.leader_id AND sub.status = 'active') as follower_count,
+                (SELECT COUNT(*) FROM signals sig WHERE sig.agent_id = s.leader_id AND sig.message_type = 'operation' AND sig.created_at >= datetime('now', '-7 day')) as recent_trade_count_7d,
+                (SELECT COUNT(*) FROM signals sig WHERE sig.agent_id = s.leader_id AND sig.message_type = 'strategy' AND sig.created_at >= datetime('now', '-7 day')) as recent_strategy_count_7d,
+                (SELECT COUNT(*) FROM signals sig WHERE sig.agent_id = s.leader_id AND sig.message_type = 'discussion' AND sig.created_at >= datetime('now', '-7 day')) as recent_discussion_count_7d,
+                (SELECT MAX(sig.created_at) FROM signals sig WHERE sig.agent_id = s.leader_id) as recent_activity_at,
+                (SELECT sig.signal_id FROM signals sig WHERE sig.agent_id = s.leader_id AND sig.message_type = 'strategy' ORDER BY sig.created_at DESC LIMIT 1) as latest_strategy_signal_id,
+                (SELECT sig.title FROM signals sig WHERE sig.agent_id = s.leader_id AND sig.message_type = 'strategy' ORDER BY sig.created_at DESC LIMIT 1) as latest_strategy_title,
+                (SELECT sig.signal_id FROM signals sig WHERE sig.agent_id = s.leader_id AND sig.message_type = 'discussion' ORDER BY sig.created_at DESC LIMIT 1) as latest_discussion_signal_id,
+                (SELECT sig.title FROM signals sig WHERE sig.agent_id = s.leader_id AND sig.message_type = 'discussion' ORDER BY sig.created_at DESC LIMIT 1) as latest_discussion_title
             FROM subscriptions s
             JOIN agents a ON a.id = s.leader_id
             WHERE s.follower_id = ? AND s.status = 'active'
-            ORDER BY s.created_at DESC
+            ORDER BY COALESCE(recent_activity_at, s.created_at) DESC
         """, (follower_id,))
         rows = cursor.fetchall()
         conn.close()
@@ -1366,7 +1660,16 @@ def create_app() -> FastAPI:
             following.append({
                 "leader_id": row["leader_id"],
                 "leader_name": row["leader_name"],
-                "subscribed_at": row["created_at"]
+                "subscribed_at": row["subscribed_at"],
+                "follower_count": row["follower_count"] or 0,
+                "recent_trade_count_7d": row["recent_trade_count_7d"] or 0,
+                "recent_strategy_count_7d": row["recent_strategy_count_7d"] or 0,
+                "recent_discussion_count_7d": row["recent_discussion_count_7d"] or 0,
+                "recent_activity_at": row["recent_activity_at"],
+                "latest_strategy_signal_id": row["latest_strategy_signal_id"],
+                "latest_strategy_title": row["latest_strategy_title"],
+                "latest_discussion_signal_id": row["latest_discussion_signal_id"],
+                "latest_discussion_title": row["latest_discussion_title"],
             })
 
         return {"following": following}
@@ -1384,11 +1687,17 @@ def create_app() -> FastAPI:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT s.follower_id, a.name as follower_name, s.created_at
+            SELECT
+                s.follower_id,
+                a.name as follower_name,
+                s.created_at as subscribed_at,
+                (SELECT COUNT(*) FROM signals sig WHERE sig.agent_id = s.follower_id AND sig.message_type = 'operation' AND sig.created_at >= datetime('now', '-7 day')) as recent_trade_count_7d,
+                (SELECT COUNT(*) FROM signals sig WHERE sig.agent_id = s.follower_id AND sig.message_type IN ('strategy', 'discussion') AND sig.created_at >= datetime('now', '-7 day')) as recent_social_count_7d,
+                (SELECT MAX(sig.created_at) FROM signals sig WHERE sig.agent_id = s.follower_id) as recent_activity_at
             FROM subscriptions s
             JOIN agents a ON a.id = s.follower_id
             WHERE s.leader_id = ? AND s.status = 'active'
-            ORDER BY s.created_at DESC
+            ORDER BY COALESCE(recent_activity_at, s.created_at) DESC
         """, (leader_id,))
         rows = cursor.fetchall()
         conn.close()
@@ -1398,7 +1707,10 @@ def create_app() -> FastAPI:
             subscribers.append({
                 "follower_id": row["follower_id"],
                 "follower_name": row["follower_name"],
-                "subscribed_at": row["created_at"]
+                "subscribed_at": row["subscribed_at"],
+                "recent_trade_count_7d": row["recent_trade_count_7d"] or 0,
+                "recent_social_count_7d": row["recent_social_count_7d"] or 0,
+                "recent_activity_at": row["recent_activity_at"],
             })
 
         return {"subscribers": subscribers}
@@ -1408,6 +1720,12 @@ def create_app() -> FastAPI:
     @app.get("/api/signals/{agent_id}")
     async def get_agent_signals(agent_id: int, message_type: str = None, limit: int = 50):
         """Get signals from specific agent."""
+        cache_key = (agent_id, (message_type or "").strip(), max(1, limit))
+        cached = agent_signals_cache.get(cache_key)
+        now_ts = time.time()
+        if cached and now_ts - cached[0] < AGENT_SIGNALS_CACHE_TTL_SECONDS:
+            return cached[1]
+
         conn = get_db_connection()
         cursor = conn.cursor()
 
@@ -1431,9 +1749,13 @@ def create_app() -> FastAPI:
                 signal_dict['symbols'] = [s.strip() for s in signal_dict['symbols'].split(',') if s.strip()]
             if signal_dict.get('tags') and isinstance(signal_dict['tags'], str):
                 signal_dict['tags'] = [t.strip() for t in signal_dict['tags'].split(',') if t.strip()]
+            if signal_dict.get("market") == "polymarket":
+                _decorate_polymarket_item(signal_dict, fetch_remote=False)
             signals.append(signal_dict)
 
-        return {"signals": signals}
+        payload = {"signals": signals}
+        agent_signals_cache[cache_key] = (now_ts, payload)
+        return payload
 
     # ==================== Replies ====================
 
@@ -1479,6 +1801,7 @@ def create_app() -> FastAPI:
         original_author_id = signal_row["agent_id"]
         title = signal_row["title"] or signal_row["symbol"] or f"signal {signal_row['signal_id']}"
         reply_message_type = "strategy_reply" if signal_row["message_type"] == "strategy" else "discussion_reply"
+        mention_message_type = "strategy_mention" if signal_row["message_type"] == "strategy" else "discussion_mention"
         reply_target_label = f"\"{title}\"" if signal_row["title"] else title
         if original_author_id != agent_id:
             await _push_agent_message(
@@ -1526,7 +1849,87 @@ def create_app() -> FastAPI:
                 }
             )
 
+        mentioned_names = _extract_mentions(data.content)
+        if mentioned_names:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in mentioned_names)
+            cursor.execute(
+                f"SELECT id, name FROM agents WHERE LOWER(name) IN ({placeholders})",
+                [name.lower() for name in mentioned_names]
+            )
+            mentioned_agents = cursor.fetchall()
+            conn.close()
+            excluded_ids = {agent_id, original_author_id, *participant_ids}
+            for mentioned_agent in mentioned_agents:
+                if mentioned_agent["id"] in excluded_ids:
+                    continue
+                await _push_agent_message(
+                    mentioned_agent["id"],
+                    mention_message_type,
+                    f"{agent_name} mentioned you in {reply_target_label}",
+                    {
+                        "signal_id": signal_row["signal_id"],
+                        "reply_author_id": agent_id,
+                        "reply_author_name": agent_name,
+                        "parent_message_type": signal_row["message_type"],
+                        "market": signal_row["market"],
+                        "symbol": signal_row["symbol"],
+                        "title": title,
+                    }
+                )
+
         return {"success": True, "points_earned": REPLY_PUBLISH_REWARD}
+
+    @app.post("/api/signals/{signal_id}/replies/{reply_id}/accept")
+    async def accept_signal_reply(signal_id: int, reply_id: int, authorization: str = Header(None)):
+        """Allow a strategy/discussion author to accept a reply."""
+        token = _extract_token(authorization)
+        agent = _get_agent_by_token(token)
+        if not agent:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT s.signal_id, s.agent_id, s.message_type, s.symbol, s.title, r.agent_id AS reply_author_id, r.accepted
+            FROM signals s
+            JOIN signal_replies r ON r.id = ?
+            WHERE s.signal_id = ? AND r.signal_id = s.signal_id
+        """, (reply_id, signal_id))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Reply not found")
+        if row["agent_id"] != agent["id"]:
+            conn.close()
+            raise HTTPException(status_code=403, detail="Only the original author can accept a reply")
+
+        cursor.execute("UPDATE signal_replies SET accepted = 0 WHERE signal_id = ?", (signal_id,))
+        cursor.execute("UPDATE signal_replies SET accepted = 1 WHERE id = ?", (reply_id,))
+        cursor.execute("UPDATE signals SET accepted_reply_id = ? WHERE signal_id = ?", (reply_id, signal_id))
+        conn.commit()
+        conn.close()
+
+        if row["reply_author_id"] != agent["id"]:
+            _add_agent_points(row["reply_author_id"], ACCEPT_REPLY_REWARD, "reply_accepted")
+            title = row["title"] or row["symbol"] or f"signal {signal_id}"
+            await _push_agent_message(
+                row["reply_author_id"],
+                "strategy_reply_accepted" if row["message_type"] == "strategy" else "discussion_reply_accepted",
+                f"{agent['name']} accepted your reply on \"{title}\"",
+                {
+                    "signal_id": signal_id,
+                    "reply_id": reply_id,
+                    "reply_author_id": row["reply_author_id"],
+                    "accepted_by_id": agent["id"],
+                    "accepted_by_name": agent["name"],
+                    "title": title,
+                    "parent_message_type": row["message_type"],
+                }
+            )
+
+        return {"success": True, "reply_id": reply_id, "points_earned": ACCEPT_REPLY_REWARD}
 
     # ==================== Profit History ====================
 
@@ -1623,8 +2026,59 @@ def create_app() -> FastAPI:
                 "total_profit": _clamp_profit_for_display(total_profit),
                 "current_profit": _clamp_profit_for_display(agent["profit"]),
                 "trade_count": trade_counts.get(agent["agent_id"], 0),
+                "recent_strategy_count_7d": 0,
+                "recent_discussion_count_7d": 0,
+                "recent_activity_at": agent["recorded_at"],
+                "latest_strategy_signal_id": None,
+                "latest_strategy_title": None,
+                "latest_discussion_signal_id": None,
+                "latest_discussion_title": None,
                 "history": [{"profit": _clamp_profit_for_display(h["profit"]), "recorded_at": h["recorded_at"]} for h in history]
             })
+
+        cursor.execute(f"""
+            SELECT agent_id, message_type, COUNT(*) as count, MAX(created_at) as last_created_at
+            FROM signals
+            WHERE agent_id IN ({placeholders})
+              AND message_type IN ('strategy', 'discussion')
+              AND created_at >= datetime('now', '-7 day')
+            GROUP BY agent_id, message_type
+        """, agent_ids)
+        for row in cursor.fetchall():
+            for item in result:
+                if item["agent_id"] == row["agent_id"]:
+                    if row["message_type"] == "strategy":
+                        item["recent_strategy_count_7d"] = row["count"]
+                    elif row["message_type"] == "discussion":
+                        item["recent_discussion_count_7d"] = row["count"]
+                    if row["last_created_at"] and row["last_created_at"] > (item["recent_activity_at"] or ""):
+                        item["recent_activity_at"] = row["last_created_at"]
+                    break
+
+        cursor.execute(f"""
+            SELECT agent_id, message_type, signal_id, title, created_at
+            FROM signals
+            WHERE agent_id IN ({placeholders})
+              AND message_type IN ('strategy', 'discussion')
+            ORDER BY created_at DESC
+        """, agent_ids)
+        seen_latest = set()
+        for row in cursor.fetchall():
+            key = (row["agent_id"], row["message_type"])
+            if key in seen_latest:
+                continue
+            seen_latest.add(key)
+            for item in result:
+                if item["agent_id"] == row["agent_id"]:
+                    if row["message_type"] == "strategy":
+                        item["latest_strategy_signal_id"] = row["signal_id"]
+                        item["latest_strategy_title"] = row["title"]
+                    else:
+                        item["latest_discussion_signal_id"] = row["signal_id"]
+                        item["latest_discussion_title"] = row["title"]
+                    if row["created_at"] and row["created_at"] > (item["recent_activity_at"] or ""):
+                        item["recent_activity_at"] = row["created_at"]
+                    break
 
         conn.close()
         payload = {"top_agents": result}
@@ -1647,7 +2101,7 @@ def create_app() -> FastAPI:
 
             # Get all positions for this agent
             cursor.execute("""
-                SELECT symbol, market, side, quantity, entry_price, current_price
+                SELECT symbol, market, token_id, outcome, side, quantity, entry_price, current_price
                 FROM positions WHERE agent_id = ?
             """, (agent_id,))
             positions = cursor.fetchall()
@@ -1691,9 +2145,9 @@ def create_app() -> FastAPI:
 
         # Get symbols ranked by holder count with current prices
         cursor.execute("""
-            SELECT symbol, market, COUNT(DISTINCT agent_id) as holder_count
+            SELECT symbol, market, token_id, outcome, COUNT(DISTINCT agent_id) as holder_count
             FROM positions
-            GROUP BY symbol, market
+            GROUP BY symbol, market, token_id, outcome
             ORDER BY holder_count DESC
             LIMIT ?
         """, (limit,))
@@ -1704,14 +2158,16 @@ def create_app() -> FastAPI:
             # Get current price from positions table
             cursor.execute("""
                 SELECT current_price FROM positions
-                WHERE symbol = ? AND market = ?
+                WHERE symbol = ? AND market = ? AND COALESCE(token_id, '') = COALESCE(?, '')
                 LIMIT 1
-            """, (row["symbol"], row["market"]))
+            """, (row["symbol"], row["market"], row["token_id"]))
             price_row = cursor.fetchone()
 
             result.append({
                 "symbol": row["symbol"],
                 "market": row["market"],
+                "token_id": row["token_id"],
+                "outcome": row["outcome"],
                 "holder_count": row["holder_count"],
                 "current_price": price_row["current_price"] if price_row else None
             })
@@ -1726,6 +2182,8 @@ def create_app() -> FastAPI:
     async def get_price(
         symbol: str,
         market: str = "us-stock",
+        token_id: Optional[str] = None,
+        outcome: Optional[str] = None,
         authorization: str = Header(None)
     ):
         """Get current price for a symbol."""
@@ -1745,10 +2203,14 @@ def create_app() -> FastAPI:
 
         # Always use UTC timestamp to avoid server-local timezone drift
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        price = get_price_from_market(symbol.upper(), now, market)
+        normalized_symbol = symbol.upper() if market == "us-stock" else symbol
+        price = get_price_from_market(normalized_symbol, now, market, token_id=token_id, outcome=outcome)
 
-        if price:
-            return {"symbol": symbol.upper(), "market": market, "price": price}
+        if price is not None:
+            payload = {"symbol": normalized_symbol, "market": market, "token_id": token_id, "outcome": outcome, "price": price}
+            if market == "polymarket":
+                _decorate_polymarket_item(payload, fetch_remote=True)
+            return payload
         else:
             raise HTTPException(status_code=404, detail="Price not available")
 
@@ -1785,7 +2247,13 @@ def create_app() -> FastAPI:
             current_price = row["current_price"]
 
             if not current_price:
-                current_price = get_price_from_market(symbol, now_str, market)
+                current_price = get_price_from_market(
+                    symbol,
+                    now_str,
+                    market,
+                    token_id=row["token_id"],
+                    outcome=row["outcome"],
+                )
                 if current_price:
                     cursor.execute("UPDATE positions SET current_price = ? WHERE id = ?",
                                   (current_price, row["id"]))
@@ -1802,6 +2270,9 @@ def create_app() -> FastAPI:
             positions.append({
                 "id": row["id"],
                 "symbol": row["symbol"],
+                "market": row["market"],
+                "token_id": row["token_id"],
+                "outcome": row["outcome"],
                 "side": row["side"],
                 "quantity": row["quantity"],
                 "entry_price": row["entry_price"],
@@ -1810,6 +2281,8 @@ def create_app() -> FastAPI:
                 "source": source,
                 "opened_at": row["opened_at"]
             })
+            if positions[-1]["market"] == "polymarket":
+                _decorate_polymarket_item(positions[-1], fetch_remote=False)
 
         conn.commit()
         conn.close()
@@ -1830,7 +2303,7 @@ def create_app() -> FastAPI:
         agent_cash = agent_row["cash"] if agent_row else 0
 
         cursor.execute("""
-            SELECT symbol, market, side, quantity, entry_price, current_price
+            SELECT symbol, market, token_id, outcome, side, quantity, entry_price, current_price
             FROM positions
             WHERE agent_id = ?
             ORDER BY opened_at DESC
@@ -1849,7 +2322,13 @@ def create_app() -> FastAPI:
             current_price = row["current_price"]
 
             if not current_price:
-                current_price = get_price_from_market(symbol, now_str, market)
+                current_price = get_price_from_market(
+                    symbol,
+                    now_str,
+                    market,
+                    token_id=row["token_id"],
+                    outcome=row["outcome"],
+                )
 
             pnl = None
             if current_price and row["entry_price"]:
@@ -1864,12 +2343,16 @@ def create_app() -> FastAPI:
             positions.append({
                 "symbol": symbol,
                 "market": market,
+                "token_id": row["token_id"],
+                "outcome": row["outcome"],
                 "side": row["side"],
                 "quantity": row["quantity"],
                 "entry_price": row["entry_price"],
                 "current_price": current_price,
                 "pnl": pnl
             })
+            if positions[-1]["market"] == "polymarket":
+                _decorate_polymarket_item(positions[-1], fetch_remote=False)
 
         return {
             "positions": positions,
@@ -1877,6 +2360,35 @@ def create_app() -> FastAPI:
             "position_count": len(positions),
             "agent_name": agent_name,
             "cash": agent_cash
+        }
+
+    @app.get("/api/agents/{agent_id}/summary")
+    async def get_agent_summary(agent_id: int):
+        """Get lightweight public summary for an agent."""
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT
+                a.id,
+                a.name,
+                a.cash,
+                (SELECT MAX(created_at) FROM signals WHERE agent_id = a.id) AS recent_activity_at,
+                (SELECT COUNT(*) FROM positions WHERE agent_id = a.id) AS position_count
+            FROM agents a
+            WHERE a.id = ?
+        """, (agent_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        return {
+            "agent_id": row["id"],
+            "agent_name": row["name"],
+            "cash": row["cash"],
+            "position_count": row["position_count"] or 0,
+            "recent_activity_at": row["recent_activity_at"],
         }
 
     # ==================== Follow ====================
@@ -1893,6 +2405,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=401, detail="Invalid token")
 
         follower_id = agent["id"]
+        follower_name = agent["name"]
         leader_id = data.leader_id
 
         if follower_id == leader_id:
@@ -1916,6 +2429,17 @@ def create_app() -> FastAPI:
         """, (leader_id, follower_id))
         conn.commit()
         conn.close()
+
+        await _push_agent_message(
+            leader_id,
+            "new_follower",
+            f"{follower_name} started following you",
+            {
+                "leader_id": leader_id,
+                "follower_id": follower_id,
+                "follower_name": follower_name,
+            }
+        )
 
         return {"success": True, "message": "Following"}
 

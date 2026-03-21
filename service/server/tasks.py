@@ -5,12 +5,58 @@ Tasks Module
 """
 
 import asyncio
+import json
 import os
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 # Global trending cache (shared with routes)
 trending_cache: list = []
+
+
+def _backfill_polymarket_position_metadata() -> None:
+    """Best-effort backfill for legacy Polymarket positions missing token_id/outcome."""
+    from database import get_db_connection
+    from price_fetcher import _polymarket_resolve_reference
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT id, symbol, token_id, outcome
+            FROM positions
+            WHERE market = 'polymarket' AND (token_id IS NULL OR token_id = '')
+        """)
+        rows = cursor.fetchall()
+        if not rows:
+            conn.close()
+            return
+
+        updated = 0
+        skipped = 0
+        for row in rows:
+            outcome = row["outcome"]
+            if not outcome:
+                skipped += 1
+                continue
+            contract = _polymarket_resolve_reference(row["symbol"], outcome=outcome)
+            if not contract or not contract.get("token_id"):
+                skipped += 1
+                continue
+            cursor.execute("""
+                UPDATE positions
+                SET token_id = ?, outcome = COALESCE(outcome, ?)
+                WHERE id = ?
+            """, (contract["token_id"], contract.get("outcome"), row["id"]))
+            updated += 1
+
+        if updated > 0:
+            conn.commit()
+            print(f"[Polymarket Backfill] Updated {updated} legacy positions; skipped={skipped}")
+        else:
+            conn.rollback()
+    finally:
+        conn.close()
 
 
 def _update_trending_cache():
@@ -22,9 +68,9 @@ def _update_trending_cache():
 
     # Get symbols ranked by holder count with current prices
     cursor.execute("""
-        SELECT symbol, market, COUNT(DISTINCT agent_id) as holder_count
+        SELECT symbol, market, token_id, outcome, COUNT(DISTINCT agent_id) as holder_count
         FROM positions
-        GROUP BY symbol, market
+        GROUP BY symbol, market, token_id, outcome
         ORDER BY holder_count DESC
         LIMIT 20
     """)
@@ -35,14 +81,16 @@ def _update_trending_cache():
         # Get current price from positions table
         cursor.execute("""
             SELECT current_price FROM positions
-            WHERE symbol = ? AND market = ?
+            WHERE symbol = ? AND market = ? AND COALESCE(token_id, '') = COALESCE(?, '')
             LIMIT 1
-        """, (row["symbol"], row["market"]))
+        """, (row["symbol"], row["market"], row["token_id"]))
         price_row = cursor.fetchone()
 
         trending_cache.append({
             "symbol": row["symbol"],
             "market": row["market"],
+            "token_id": row["token_id"],
+            "outcome": row["outcome"],
             "holder_count": row["holder_count"],
             "current_price": price_row["current_price"] if price_row else None
         })
@@ -63,12 +111,13 @@ async def update_position_prices():
 
     while True:
         try:
+            _backfill_polymarket_position_metadata()
             conn = get_db_connection()
             cursor = conn.cursor()
 
             # Get all unique positions with symbol and market
             cursor.execute("""
-                SELECT DISTINCT symbol, market
+                SELECT DISTINCT symbol, market, token_id, outcome
                 FROM positions
             """)
             unique_positions = cursor.fetchall()
@@ -81,6 +130,8 @@ async def update_position_prices():
             async def fetch_and_update(row):
                 symbol = row["symbol"]
                 market = row["market"]
+                token_id = row["token_id"]
+                outcome = row["outcome"]
 
                 async with semaphore:
                     # Run synchronous function in thread pool
@@ -88,7 +139,7 @@ async def update_position_prices():
                     now = datetime.now(timezone.utc)
                     executed_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
                     price = await asyncio.to_thread(
-                        get_price_from_market, symbol, executed_at, market
+                        get_price_from_market, symbol, executed_at, market, token_id, outcome
                     )
 
                     if price:
@@ -98,13 +149,13 @@ async def update_position_prices():
                         cursor2.execute("""
                             UPDATE positions
                             SET current_price = ?
-                            WHERE symbol = ? AND market = ?
-                        """, (price, symbol, market))
+                            WHERE symbol = ? AND market = ? AND COALESCE(token_id, '') = COALESCE(?, '')
+                        """, (price, symbol, market, token_id))
                         conn2.commit()
                         conn2.close()
-                        print(f"[Price Update] {symbol} ({market}): ${price}")
+                        print(f"[Price Update] {symbol} ({market}, token={token_id or '-'}): ${price}")
                     else:
-                        print(f"[Price Update] Failed to get price for {symbol} ({market})")
+                        print(f"[Price Update] Failed to get price for {symbol} ({market}, token={token_id or '-'})")
 
                 return price
 
@@ -219,9 +270,10 @@ async def settle_polymarket_positions():
     Background task to auto-settle resolved Polymarket positions.
 
     When a Polymarket market resolves, Gamma exposes `resolved` and `settlementPrice`.
-    We treat the held outcome token as spot-like inventory:
+    We treat each held outcome token as explicit spot-like inventory:
     - proceeds = quantity * settlementPrice
     - credit proceeds to agent cash
+    - record an immutable settlement ledger entry
     - delete the position
     """
     from database import get_db_connection
@@ -237,10 +289,11 @@ async def settle_polymarket_positions():
             interval_s = 60
 
         try:
+            _backfill_polymarket_position_metadata()
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT id, agent_id, symbol, quantity, entry_price
+                SELECT id, agent_id, symbol, token_id, outcome, quantity, entry_price
                 FROM positions
                 WHERE market = 'polymarket'
             """)
@@ -253,9 +306,15 @@ async def settle_polymarket_positions():
                 pos_id = row["id"]
                 agent_id = row["agent_id"]
                 symbol = row["symbol"]
+                token_id = row["token_id"]
+                outcome = row["outcome"]
                 qty = row["quantity"] or 0
 
-                resolution = _polymarket_resolve(symbol)
+                if not token_id:
+                    skipped += 1
+                    continue
+
+                resolution = _polymarket_resolve(symbol, token_id=token_id, outcome=outcome)
                 if not resolution or not resolution.get("resolved"):
                     skipped += 1
                     continue
@@ -269,6 +328,25 @@ async def settle_polymarket_positions():
 
                 # Apply settlement atomically
                 cursor.execute("UPDATE agents SET cash = cash + ? WHERE id = ?", (proceeds, agent_id))
+                cursor.execute("""
+                    INSERT INTO polymarket_settlements
+                    (position_id, agent_id, symbol, token_id, outcome, quantity, entry_price, settlement_price, proceeds, market_slug, resolved_outcome, resolved_at, source_data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    pos_id,
+                    agent_id,
+                    symbol,
+                    token_id,
+                    outcome,
+                    qty,
+                    row["entry_price"],
+                    settlement_price,
+                    proceeds,
+                    resolution.get("market_slug"),
+                    resolution.get("resolved_outcome"),
+                    datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    json.dumps(resolution),
+                ))
                 cursor.execute("DELETE FROM positions WHERE id = ?", (pos_id,))
                 settled += 1
 
