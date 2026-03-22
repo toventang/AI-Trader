@@ -35,9 +35,18 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-from database import init_database, get_db_connection
+from database import init_database, get_database_status
 from routes import create_app
-from tasks import update_position_prices, record_profit_history, settle_polymarket_positions, _update_trending_cache
+from tasks import (
+    update_position_prices,
+    record_profit_history,
+    settle_polymarket_positions,
+    refresh_etf_flow_snapshots_loop,
+    refresh_macro_signal_snapshots_loop,
+    refresh_market_news_snapshots_loop,
+    refresh_stock_analysis_snapshots_loop,
+    _update_trending_cache,
+)
 
 # Initialize database
 init_database()
@@ -52,6 +61,12 @@ app = create_app()
 async def startup_event():
     """Startup event - schedule background tasks."""
     import asyncio
+    db_status = get_database_status()
+    logger.info(
+        "Database ready: backend=%s details=%s",
+        db_status.get("backend"),
+        {key: value for key, value in db_status.items() if key != "backend"},
+    )
     # Initialize trending cache
     logger.info("Initializing trending cache...")
     _update_trending_cache()
@@ -64,6 +79,18 @@ async def startup_event():
     # Start background task for Polymarket settlement
     logger.info("Starting Polymarket settlement task...")
     asyncio.create_task(settle_polymarket_positions())
+    # Start background task for market-news snapshots
+    logger.info("Starting market news snapshot task...")
+    asyncio.create_task(refresh_market_news_snapshots_loop())
+    # Start background task for macro signal snapshots
+    logger.info("Starting macro signal snapshot task...")
+    asyncio.create_task(refresh_macro_signal_snapshots_loop())
+    # Start background task for ETF flow snapshots
+    logger.info("Starting ETF flow snapshot task...")
+    asyncio.create_task(refresh_etf_flow_snapshots_loop())
+    # Start background task for stock analysis snapshots
+    logger.info("Starting stock analysis snapshot task...")
+    asyncio.create_task(refresh_stock_analysis_snapshots_loop())
     logger.info("All background tasks started")
 
 

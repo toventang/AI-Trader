@@ -168,6 +168,15 @@ def _enforce_content_rate_limit(agent_id: int, action: str, content: str, target
 
 from config import CORS_ORIGINS, SIGNAL_PUBLISH_REWARD, SIGNAL_ADOPT_REWARD, DISCUSSION_PUBLISH_REWARD, REPLY_PUBLISH_REWARD
 from database import get_db_connection
+from market_intel import (
+    get_market_intel_overview,
+    get_market_news_payload,
+    get_macro_signals_payload,
+    get_etf_flows_payload,
+    get_stock_analysis_latest_payload,
+    get_stock_analysis_history_payload,
+    get_featured_stock_analysis_payload,
+)
 from utils import hash_password, verify_password, generate_verification_code, cleanup_expired_tokens, validate_address, _extract_token
 from services import _get_agent_by_token, _get_user_by_token, _create_user_session, _add_agent_points, _get_agent_points, _reserve_signal_id, _update_position_from_signal, _broadcast_signal_to_followers
 from price_fetcher import get_price_from_market
@@ -346,6 +355,44 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health_check():
         return {"status": "ok", "timestamp": _utc_now_iso_z()}
+
+    # ==================== Market Intelligence ====================
+
+    @app.get("/api/market-intel/overview")
+    async def market_intel_overview():
+        """Read-only overview for the financial events board."""
+        return get_market_intel_overview()
+
+    @app.get("/api/market-intel/news")
+    async def market_intel_news(category: Optional[str] = None, limit: int = 5):
+        """Read-only market-news snapshots grouped by category."""
+        safe_limit = max(1, min(limit, 12))
+        return get_market_news_payload(category=category, limit=safe_limit)
+
+    @app.get("/api/market-intel/macro-signals")
+    async def market_intel_macro_signals():
+        """Read-only macro regime snapshot."""
+        return get_macro_signals_payload()
+
+    @app.get("/api/market-intel/etf-flows")
+    async def market_intel_etf_flows():
+        """Read-only estimated ETF flow snapshot."""
+        return get_etf_flows_payload()
+
+    @app.get("/api/market-intel/stocks/featured")
+    async def market_intel_featured_stocks(limit: int = 6):
+        """Read-only featured stock-analysis snapshots."""
+        return get_featured_stock_analysis_payload(limit=max(1, min(limit, 12)))
+
+    @app.get("/api/market-intel/stocks/{symbol}/latest")
+    async def market_intel_stock_latest(symbol: str):
+        """Read-only latest stock-analysis snapshot."""
+        return get_stock_analysis_latest_payload(symbol)
+
+    @app.get("/api/market-intel/stocks/{symbol}/history")
+    async def market_intel_stock_history(symbol: str, limit: int = 10):
+        """Read-only stock-analysis history."""
+        return get_stock_analysis_history_payload(symbol, limit=limit)
 
     # ==================== WebSocket Notifications ====================
 
@@ -1425,7 +1472,7 @@ def create_app() -> FastAPI:
             FROM agents a
             LEFT JOIN signals s ON s.agent_id = a.id AND {where_clause}
             GROUP BY a.id
-            HAVING signal_count > 0
+            HAVING COUNT(s.id) > 0
             ORDER BY last_signal_at DESC
             LIMIT ? OFFSET ?
         """
@@ -1569,9 +1616,23 @@ def create_app() -> FastAPI:
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
         if sort == "active":
-            order_clause = "COALESCE(last_reply_at, s.created_at) DESC, reply_count DESC, s.created_at DESC"
+            order_clause = """
+                COALESCE(
+                    (SELECT MAX(sr.created_at) FROM signal_replies sr WHERE sr.signal_id = s.signal_id),
+                    s.created_at
+                ) DESC,
+                (SELECT COUNT(*) FROM signal_replies sr WHERE sr.signal_id = s.signal_id) DESC,
+                s.created_at DESC
+            """
         elif sort == "following" and viewer:
-            order_clause = "COALESCE(last_reply_at, s.created_at) DESC, reply_count DESC, s.created_at DESC"
+            order_clause = """
+                COALESCE(
+                    (SELECT MAX(sr.created_at) FROM signal_replies sr WHERE sr.signal_id = s.signal_id),
+                    s.created_at
+                ) DESC,
+                (SELECT COUNT(*) FROM signal_replies sr WHERE sr.signal_id = s.signal_id) DESC,
+                s.created_at DESC
+            """
         else:
             order_clause = "s.created_at DESC"
 
@@ -1650,7 +1711,10 @@ def create_app() -> FastAPI:
             FROM subscriptions s
             JOIN agents a ON a.id = s.leader_id
             WHERE s.follower_id = ? AND s.status = 'active'
-            ORDER BY COALESCE(recent_activity_at, s.created_at) DESC
+            ORDER BY COALESCE(
+                (SELECT MAX(sig.created_at) FROM signals sig WHERE sig.agent_id = s.leader_id),
+                s.created_at
+            ) DESC
         """, (follower_id,))
         rows = cursor.fetchall()
         conn.close()
@@ -1697,7 +1761,10 @@ def create_app() -> FastAPI:
             FROM subscriptions s
             JOIN agents a ON a.id = s.follower_id
             WHERE s.leader_id = ? AND s.status = 'active'
-            ORDER BY COALESCE(recent_activity_at, s.created_at) DESC
+            ORDER BY COALESCE(
+                (SELECT MAX(sig.created_at) FROM signals sig WHERE sig.agent_id = s.follower_id),
+                s.created_at
+            ) DESC
         """, (leader_id,))
         rows = cursor.fetchall()
         conn.close()
@@ -2010,10 +2077,14 @@ def create_app() -> FastAPI:
             # Get historical data within the cutoff window, with a hard cap on rows
             cursor.execute("""
                 SELECT profit, recorded_at
-                FROM profit_history
-                WHERE agent_id = ? AND recorded_at >= ?
+                FROM (
+                    SELECT profit, recorded_at
+                    FROM profit_history
+                    WHERE agent_id = ? AND recorded_at >= ?
+                    ORDER BY recorded_at DESC
+                    LIMIT 2000
+                ) recent_history
                 ORDER BY recorded_at ASC
-                LIMIT 2000
             """, (agent["agent_id"], cutoff))
             history = cursor.fetchall()
 
