@@ -128,3 +128,6 @@ CLAUDE.md
 /service/server/data/
 /TODO
 change.md
+
+# Local agent config symlink
+.codex

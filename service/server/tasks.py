@@ -713,10 +713,86 @@ async def settle_polymarket_positions():
         await asyncio.sleep(interval_s)
 
 
+async def settle_challenges_loop():
+    """Background task to settle active challenges after their end time."""
+    from challenges import settle_due_challenges
+
+    await asyncio.sleep(15)
+
+    while True:
+        interval_s = _env_int("CHALLENGE_SETTLE_INTERVAL", 120, minimum=30)
+        try:
+            settled = await asyncio.to_thread(settle_due_challenges)
+            if settled:
+                print(f"[Challenge Settler] settled={len(settled)}")
+        except Exception as e:
+            print(f"[Challenge Settler Error] {e}")
+
+        await asyncio.sleep(interval_s)
+
+
+async def form_team_missions_loop():
+    """Background task to form teams for active missions with enough participants."""
+    from team_missions import form_due_team_missions
+
+    await asyncio.sleep(18)
+
+    while True:
+        interval_s = _env_int("TEAM_MISSION_FORM_INTERVAL", 180, minimum=30)
+        try:
+            formed = await asyncio.to_thread(form_due_team_missions)
+            if formed:
+                print(f"[Team Mission Former] formed_missions={len(formed)}")
+        except Exception as e:
+            print(f"[Team Mission Former Error] {e}")
+
+        await asyncio.sleep(interval_s)
+
+
+async def score_team_contributions_loop():
+    """Background task to score new team messages/submissions into contribution records."""
+    from team_missions import score_team_contributions
+
+    await asyncio.sleep(22)
+
+    while True:
+        interval_s = _env_int("TEAM_CONTRIBUTION_SCORE_INTERVAL", 180, minimum=30)
+        try:
+            result = await asyncio.to_thread(score_team_contributions)
+            if result.get("inserted"):
+                print(f"[Team Contribution Scorer] inserted={result['inserted']}")
+        except Exception as e:
+            print(f"[Team Contribution Scorer Error] {e}")
+
+        await asyncio.sleep(interval_s)
+
+
+async def settle_team_missions_loop():
+    """Background task to settle team missions after their submission deadline."""
+    from team_missions import settle_due_team_missions
+
+    await asyncio.sleep(26)
+
+    while True:
+        interval_s = _env_int("TEAM_MISSION_SETTLE_INTERVAL", 180, minimum=30)
+        try:
+            settled = await asyncio.to_thread(settle_due_team_missions)
+            if settled:
+                print(f"[Team Mission Settler] settled={len(settled)}")
+        except Exception as e:
+            print(f"[Team Mission Settler Error] {e}")
+
+        await asyncio.sleep(interval_s)
+
+
 BACKGROUND_TASK_REGISTRY = {
     "prices": update_position_prices,
     "profit_history": record_profit_history,
     "polymarket_settlement": settle_polymarket_positions,
+    "challenge_settlement": settle_challenges_loop,
+    "team_mission_form": form_team_missions_loop,
+    "team_contribution_score": score_team_contributions_loop,
+    "team_mission_settlement": settle_team_missions_loop,
     "market_news": refresh_market_news_snapshots_loop,
     "macro_signals": refresh_macro_signal_snapshots_loop,
     "etf_flows": refresh_etf_flow_snapshots_loop,

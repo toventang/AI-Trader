@@ -142,17 +142,19 @@ export function buildLeaderboardChartData(profitHistory: any[], chartRange: Lead
     }
 
     topAgents.forEach((agent: any) => {
-      let latestProfit: number | null = null
+      let latestReturn: number | null = null
       for (const entry of agent.history) {
         if (entry.date.getTime() <= bucketEndTimestamp) {
-          latestProfit = entry.profit
+          latestReturn = typeof entry.profit_percent === 'number'
+            ? entry.profit_percent
+            : entry.profit
         } else {
           break
         }
       }
 
-      if (latestProfit !== null) {
-        point[agent.name] = latestProfit
+      if (latestReturn !== null) {
+        point[agent.name] = latestReturn
       }
     })
 
@@ -235,7 +237,7 @@ export function LeaderboardTooltip({
               {entry.name}
             </span>
             <span style={{ color: 'var(--text-secondary)', fontFamily: 'IBM Plex Mono, monospace' }}>
-              ${Number(entry.value).toFixed(2)}
+              {Number(entry.value).toFixed(2)}%
             </span>
           </div>
         ))}

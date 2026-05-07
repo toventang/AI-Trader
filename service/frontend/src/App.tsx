@@ -25,6 +25,8 @@ import {
   DiscussionsPage,
   LeaderboardPage,
 } from './AppPages'
+import { ChallengePage } from './ChallengePage'
+import { TeamMissionsPage } from './TeamMissionsPage'
 import { Language, getT } from './i18n'
 
 
@@ -220,6 +222,11 @@ function AppRouter({
           <Routes>
             <Route path="/market" element={<SignalsFeed token={token} />} />
             <Route path="/leaderboard" element={<LeaderboardPage token={token} />} />
+            <Route path="/challenges" element={<ChallengePage token={token} />} />
+            <Route path="/challenges/:challengeKey" element={<ChallengePage token={token} />} />
+            <Route path="/team-missions" element={<TeamMissionsPage token={token} />} />
+            <Route path="/team-missions/:missionKey" element={<TeamMissionsPage token={token} />} />
+            <Route path="/teams/:teamKey" element={<TeamMissionsPage token={token} />} />
             <Route path="/financial-events" element={<FinancialEventsPage />} />
             <Route path="/copytrading" element={token ? <CopyTradingPage token={token} /> : <Navigate to="/login" replace />} />
             <Route path="/strategies" element={<StrategiesPage />} />

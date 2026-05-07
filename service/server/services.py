@@ -100,34 +100,24 @@ def _create_user_session(user_id: int) -> str:
 
 
 def _add_agent_points(agent_id: int, points: int, reason: str = "reward") -> bool:
-    """Add points to an agent's account. Returns True if successful."""
+    """Add points to an agent's account through the reward ledger."""
     if points <= 0:
         return False
 
     # Retry transient write conflicts on both SQLite and PostgreSQL.
     max_retries = 3
     for attempt in range(max_retries):
-        conn = get_db_connection()
-        cursor = conn.cursor()
         try:
-            cursor.execute("""
-                UPDATE agents SET points = points + ? WHERE id = ?
-            """, (points, agent_id))
-            conn.commit()
-            return True
-        except Exception as e:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+            from rewards import grant_agent_reward
 
+            result = grant_agent_reward(agent_id, points, reason)
+            return bool(result.get("success"))
+        except Exception as e:
             if is_retryable_db_error(e) and attempt < max_retries - 1:
                 time.sleep(0.5 * (attempt + 1))
                 continue
             print(f"[ERROR] Failed to add points to agent {agent_id}: {e}")
             return False
-        finally:
-            conn.close()
     return False
 
 

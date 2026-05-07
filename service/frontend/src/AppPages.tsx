@@ -1715,6 +1715,7 @@ export function CopyTradingPage({ token }: { token: string }) {
 
   const providerTotalPages = Math.max(1, Math.ceil(providerTotal / COPY_TRADING_PAGE_SIZE))
   const followingTotalPages = Math.max(1, Math.ceil(followingTotal / COPY_TRADING_PAGE_SIZE))
+  const formatReturnPercent = (value: any) => `${Number(value || 0).toFixed(2)}%`
 
   if (loading) {
     return <div className="loading"><div className="spinner"></div></div>
@@ -1803,9 +1804,12 @@ export function CopyTradingPage({ token }: { token: string }) {
 
                   <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap', marginTop: '14px', marginBottom: '10px' }}>
                     <div>
-                      <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{language === 'zh' ? '累计收益' : 'Total Profit'}</div>
-                      <div style={{ fontWeight: 700, color: (provider.total_profit || 0) >= 0 ? '#22c55e' : '#ef4444' }}>
-                        ${(provider.total_profit || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{language === 'zh' ? '收益率' : 'Return'}</div>
+                      <div style={{ fontWeight: 700, color: (provider.total_profit_percent || 0) >= 0 ? '#22c55e' : '#ef4444' }}>
+                        {formatReturnPercent(provider.total_profit_percent)}
+                        <span style={{ color: 'var(--text-muted)', marginLeft: '6px', fontSize: '12px', fontWeight: 500 }}>
+                          ${(provider.total_profit || 0).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                        </span>
                       </div>
                     </div>
                     <div>
@@ -1916,10 +1920,10 @@ export function CopyTradingPage({ token }: { token: string }) {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                       {provider && (
                         <span style={{
-                          color: (provider.total_profit || 0) >= 0 ? '#22c55e' : '#ef4444',
+                          color: (provider.total_profit_percent || 0) >= 0 ? '#22c55e' : '#ef4444',
                           fontWeight: 600
                         }}>
-                          ${(provider.total_profit || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          {formatReturnPercent(provider.total_profit_percent)}
                         </span>
                       )}
                       <button
@@ -1986,6 +1990,7 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
   const [leaderboardPage, setLeaderboardPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [chartRange, setChartRange] = useState<LeaderboardChartRange>('24h')
+  const [activeChallengeCount, setActiveChallengeCount] = useState(0)
   const { language } = useLanguage()
   const navigate = useNavigate()
 
@@ -1996,6 +2001,21 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
     }, REFRESH_INTERVAL)
     return () => clearInterval(interval)
   }, [chartRange, leaderboardPage])
+
+  useEffect(() => {
+    const loadActiveChallengeCount = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/challenges?status=active&limit=1`)
+        if (!res.ok) return
+        const data = await res.json()
+        setActiveChallengeCount(data.total || 0)
+      } catch (e) {
+        console.error(e)
+      }
+    }
+
+    loadActiveChallengeCount()
+  }, [])
 
   const loadProfitHistory = async (pageToLoad = leaderboardPage) => {
     try {
@@ -2022,6 +2042,7 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
   const topChartAgents = useMemo(() => profitHistory.slice(0, 10), [profitHistory])
   const leaderboardTotalPages = Math.max(1, Math.ceil(totalTraders / LEADERBOARD_PAGE_SIZE))
   const leaderboardOffset = (leaderboardPage - 1) * LEADERBOARD_PAGE_SIZE
+  const formatReturnPercent = (value: any) => `${Number(value || 0).toFixed(2)}%`
 
   if (loading) {
     return <div className="loading"><div className="spinner"></div></div>
@@ -2034,7 +2055,7 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
           <h1 className="header-title">{language === 'zh' ? '🏆 交易员排行榜' : '🏆 Top Traders'}</h1>
 
           <p className="header-subtitle">
-            {language === 'zh' ? '按累计收益排序（包含已实现和浮动盈亏）' : 'Ranked by cumulative profit (realized + unrealized)'}
+            {language === 'zh' ? '按收益率排序（已实现和浮动盈亏 / 初始本金与兑换本金）' : 'Ranked by return rate (realized + unrealized PnL / capital base)'}
           </p>
         </div>
       </div>
@@ -2052,12 +2073,26 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
         </div>
       )}
 
+      {activeChallengeCount > 0 && (
+        <div className="card" style={{ marginBottom: '20px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+          <div>
+            <span className="challenge-badge">{language === 'zh' ? 'Challenge active' : 'Challenge active'}</span>
+            <span style={{ marginLeft: '10px', color: 'var(--text-secondary)', fontSize: '14px' }}>
+              {language === 'zh' ? `${activeChallengeCount} 个挑战正在计分` : `${activeChallengeCount} challenge leaderboards are scoring`}
+            </span>
+          </div>
+          <button className="btn btn-ghost" onClick={() => navigate('/challenges')}>
+            {language === 'zh' ? '打开挑战赛' : 'Open challenges'}
+          </button>
+        </div>
+      )}
+
       {/* Profit Chart */}
       {chartData.length > 0 && (
         <div className="card" style={{ marginBottom: '20px', padding: '16px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '12px' }}>
             <h3 style={{ fontSize: '16px', margin: 0 }}>
-              {language === 'zh' ? '收益曲线' : 'Profit Chart'}
+              {language === 'zh' ? '收益率曲线' : 'Return Chart'}
             </h3>
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
               <button
@@ -2105,7 +2140,7 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
                 >
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--bg-tertiary)" />
                   <XAxis dataKey="time" stroke="var(--text-secondary)" tick={{ fontSize: 10 }} minTickGap={24} />
-                  <YAxis stroke="var(--text-secondary)" tick={{ fontSize: 12 }} tickFormatter={(value: any) => `$${(Number(value)/1000).toFixed(0)}k`} />
+                  <YAxis stroke="var(--text-secondary)" tick={{ fontSize: 12 }} tickFormatter={(value: any) => `${Number(value).toFixed(0)}%`} />
                   <Tooltip
                     content={<LeaderboardTooltip />}
                   />
@@ -2231,13 +2266,16 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px' }}>
                   <div>
                     <span style={{ color: 'var(--text-secondary)' }}>
-                      {language === 'zh' ? '累计收益' : 'Cumulative PnL'}: </span>
+                      {language === 'zh' ? '收益率' : 'Return'}: </span>
                     <span style={{
-                      color: agent.total_profit >= 0 ? 'var(--success)' : 'var(--error)',
+                      color: (agent.total_profit_percent || 0) >= 0 ? 'var(--success)' : 'var(--error)',
                       fontWeight: 700,
                       fontSize: '16px'
                     }}>
-                      ${agent.total_profit?.toFixed(2) || '0.00'}
+                      {formatReturnPercent(agent.total_profit_percent)}
+                    </span>
+                    <span style={{ color: 'var(--text-muted)', marginLeft: '8px', fontSize: '12px' }}>
+                      (${agent.total_profit?.toFixed(2) || '0.00'})
                     </span>
                   </div>
                   <div>
@@ -2414,6 +2452,7 @@ export function TradePage({ token, agentInfo, onTradeSuccess }: { token: string,
   const [content, setContent] = useState('')
   const [currentPrice, setCurrentPrice] = useState<number | null>(null)
   const [priceLoading, setPriceLoading] = useState(false)
+  const [activeChallenges, setActiveChallenges] = useState<any[]>([])
 
   // Get current time for display
   const [currentTime, setCurrentTime] = useState(() => new Date().toISOString())
@@ -2425,6 +2464,23 @@ export function TradePage({ token, agentInfo, onTradeSuccess }: { token: string,
     }, 1000)
     return () => clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    const loadActiveChallenges = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/challenges/me`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        if (!res.ok) return
+        const data = await res.json()
+        setActiveChallenges((data.challenges || []).filter((challenge: any) => challenge.status === 'active'))
+      } catch (e) {
+        console.error(e)
+      }
+    }
+
+    loadActiveChallenges()
+  }, [token])
 
   // Polymarket is spot-like in this app: no short/cover. Force a valid action when switching.
   useEffect(() => {
@@ -2566,9 +2622,31 @@ export function TradePage({ token, agentInfo, onTradeSuccess }: { token: string,
     setLoading(false)
   }
 
+  const matchingChallenges = activeChallenges.filter((challenge) => {
+    if (challenge.market !== market) return false
+    if (!challenge.symbol || challenge.symbol === 'all') return true
+    if (!symbol.trim()) return true
+    return String(challenge.symbol).toUpperCase() === symbol.trim().toUpperCase()
+  })
+
   return (
     <div className="page-container">
       <h2 className="page-title">{t.trade.title}</h2>
+
+      {matchingChallenges.length > 0 && (
+        <div className="card" style={{ marginBottom: '20px', padding: '16px' }}>
+          <div style={{ fontWeight: 700, marginBottom: '8px' }}>
+            {language === 'zh' ? '当前交易会计入挑战赛' : 'This trade will count toward active challenges'}
+          </div>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            {matchingChallenges.map((challenge) => (
+              <span key={challenge.challenge_key} className="tag">
+                {challenge.title}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} className="form-card">
         {/* Market */}

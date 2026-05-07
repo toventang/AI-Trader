@@ -75,6 +75,33 @@ function AuthShell({
   )
 }
 
+async function fetchActiveChallengeOptions() {
+  try {
+    const res = await fetch(`${API_BASE}/challenges?status=active&limit=100`)
+    if (!res.ok) return []
+    const data = await res.json()
+    return data.challenges || []
+  } catch (e) {
+    console.error(e)
+    return []
+  }
+}
+
+async function fetchMyTeamMissionOptions(token: string | null) {
+  if (!token) return []
+  try {
+    const res = await fetch(`${API_BASE}/team-missions/me`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    return data.missions || []
+  } catch (e) {
+    console.error(e)
+    return []
+  }
+}
+
 function SignalCard({
   signal,
   onRefresh,
@@ -101,6 +128,7 @@ function SignalCard({
   const [loadingReplies, setLoadingReplies] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const { language } = useLanguage()
+  const teamBadges = Array.isArray(signal.team_badges) ? signal.team_badges : []
 
   const loadReplies = async () => {
     setLoadingReplies(true)
@@ -212,6 +240,17 @@ function SignalCard({
         </div>
       )}
 
+      {teamBadges.length > 0 && (
+        <div className="team-signal-badges">
+          {teamBadges.map((badge: any) => (
+            <span key={`${badge.mission_key}-${badge.team_key}`} className="team-signal-badge">
+              <Link to={`/team-missions/${badge.mission_key}`}>{badge.mission_title || badge.mission_key}</Link>
+              <Link to={`/teams/${badge.team_key}`}>{badge.team_name || badge.team_key}</Link>
+            </span>
+          ))}
+        </div>
+      )}
+
       <p className="signal-content">{signal.content}</p>
 
       <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
@@ -320,7 +359,9 @@ export function StrategiesPage() {
   const [viewerId, setViewerId] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] = useState(false)
-  const [formData, setFormData] = useState({ title: '', content: '', symbols: '', tags: '', market: 'us-stock' })
+  const [formData, setFormData] = useState({ title: '', content: '', symbols: '', tags: '', market: 'us-stock', challenge_key: '', mission_key: '', team_key: '' })
+  const [activeChallenges, setActiveChallenges] = useState<any[]>([])
+  const [teamMissionOptions, setTeamMissionOptions] = useState<any[]>([])
   const [sort, setSort] = useState<'new' | 'active' | 'following'>('active')
   const { t, language } = useLanguage()
   const location = useLocation()
@@ -331,6 +372,8 @@ export function StrategiesPage() {
 
   useEffect(() => {
     loadStrategies(strategyPage)
+    fetchActiveChallengeOptions().then(setActiveChallenges)
+    fetchMyTeamMissionOptions(token).then(setTeamMissionOptions)
     if (token) {
       loadViewerContext()
     }
@@ -432,10 +475,13 @@ export function StrategiesPage() {
           content: formData.content,
           symbols: formData.symbols,
           tags: formData.tags,
+          challenge_key: formData.challenge_key || undefined,
+          mission_key: formData.mission_key || undefined,
+          team_key: formData.team_key || undefined,
         })
       })
       if (res.ok) {
-        setFormData({ title: '', content: '', symbols: '', tags: '', market: 'us-stock' })
+        setFormData({ title: '', content: '', symbols: '', tags: '', market: 'us-stock', challenge_key: '', mission_key: '', team_key: '' })
         setShowForm(false)
         setStrategyPage(1)
         loadStrategies(1)
@@ -499,6 +545,62 @@ export function StrategiesPage() {
                   </option>
                 ))}
               </select>
+            </div>
+            <div className="form-group">
+              <label className="form-label">{language === 'zh' ? '绑定挑战（可选）' : 'Challenge (optional)'}</label>
+              <select
+                className="form-select"
+                value={formData.challenge_key}
+                onChange={e => setFormData({ ...formData, challenge_key: e.target.value })}
+              >
+                <option value="">{language === 'zh' ? '不绑定' : 'No challenge'}</option>
+                {activeChallenges.map((challenge: any) => (
+                  <option key={challenge.challenge_key} value={challenge.challenge_key}>
+                    {challenge.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="team-binding-grid">
+              <div className="form-group">
+                <label className="form-label">{language === 'zh' ? 'Team Mission（可选）' : 'Team Mission (optional)'}</label>
+                <select
+                  className="form-select"
+                  value={formData.mission_key}
+                  onChange={e => setFormData({ ...formData, mission_key: e.target.value, team_key: '' })}
+                >
+                  <option value="">{language === 'zh' ? '不绑定' : 'No mission'}</option>
+                  {teamMissionOptions.map((mission: any) => (
+                    <option key={mission.mission_key} value={mission.mission_key}>
+                      {mission.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">{language === 'zh' ? 'Team（可选）' : 'Team (optional)'}</label>
+                <select
+                  className="form-select"
+                  value={formData.team_key}
+                  onChange={e => {
+                    const selected = teamMissionOptions.find((mission: any) => mission.team_key === e.target.value)
+                    setFormData({
+                      ...formData,
+                      team_key: e.target.value,
+                      mission_key: selected?.mission_key || formData.mission_key
+                    })
+                  }}
+                >
+                  <option value="">{language === 'zh' ? '自动使用当前 Mission Team' : 'Use mission team automatically'}</option>
+                  {teamMissionOptions
+                    .filter((mission: any) => mission.team_key && (!formData.mission_key || mission.mission_key === formData.mission_key))
+                    .map((mission: any) => (
+                      <option key={mission.team_key} value={mission.team_key}>
+                        {mission.team_name || mission.team_key}
+                      </option>
+                    ))}
+                </select>
+              </div>
             </div>
             <div className="form-group">
               <label className="form-label">{t.strategies.title}</label>
@@ -627,7 +729,9 @@ export function DiscussionsPage() {
   const [viewerId, setViewerId] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] = useState(false)
-  const [formData, setFormData] = useState({ title: '', content: '', tags: '', market: 'us-stock' })
+  const [formData, setFormData] = useState({ title: '', content: '', tags: '', market: 'us-stock', challenge_key: '', mission_key: '', team_key: '' })
+  const [activeChallenges, setActiveChallenges] = useState<any[]>([])
+  const [teamMissionOptions, setTeamMissionOptions] = useState<any[]>([])
   const [sort, setSort] = useState<'new' | 'active' | 'following'>('active')
   const { t, language } = useLanguage()
   const location = useLocation()
@@ -639,6 +743,8 @@ export function DiscussionsPage() {
 
   useEffect(() => {
     loadDiscussions(discussionPage)
+    fetchActiveChallengeOptions().then(setActiveChallenges)
+    fetchMyTeamMissionOptions(token).then(setTeamMissionOptions)
     if (token) {
       loadRecentNotifications()
       loadViewerContext()
@@ -724,10 +830,13 @@ export function DiscussionsPage() {
           title: formData.title,
           content: formData.content,
           tags: formData.tags,
+          challenge_key: formData.challenge_key || undefined,
+          mission_key: formData.mission_key || undefined,
+          team_key: formData.team_key || undefined,
         })
       })
       if (res.ok) {
-        setFormData({ title: '', content: '', tags: '', market: 'us-stock' })
+        setFormData({ title: '', content: '', tags: '', market: 'us-stock', challenge_key: '', mission_key: '', team_key: '' })
         setShowForm(false)
         setDiscussionPage(1)
         loadDiscussions(1)
@@ -877,6 +986,62 @@ export function DiscussionsPage() {
                   </option>
                 ))}
               </select>
+            </div>
+            <div className="form-group">
+              <label className="form-label">{language === 'zh' ? '绑定挑战（可选）' : 'Challenge (optional)'}</label>
+              <select
+                className="form-select"
+                value={formData.challenge_key}
+                onChange={e => setFormData({ ...formData, challenge_key: e.target.value })}
+              >
+                <option value="">{language === 'zh' ? '不绑定' : 'No challenge'}</option>
+                {activeChallenges.map((challenge: any) => (
+                  <option key={challenge.challenge_key} value={challenge.challenge_key}>
+                    {challenge.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="team-binding-grid">
+              <div className="form-group">
+                <label className="form-label">{language === 'zh' ? 'Team Mission（可选）' : 'Team Mission (optional)'}</label>
+                <select
+                  className="form-select"
+                  value={formData.mission_key}
+                  onChange={e => setFormData({ ...formData, mission_key: e.target.value, team_key: '' })}
+                >
+                  <option value="">{language === 'zh' ? '不绑定' : 'No mission'}</option>
+                  {teamMissionOptions.map((mission: any) => (
+                    <option key={mission.mission_key} value={mission.mission_key}>
+                      {mission.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">{language === 'zh' ? 'Team（可选）' : 'Team (optional)'}</label>
+                <select
+                  className="form-select"
+                  value={formData.team_key}
+                  onChange={e => {
+                    const selected = teamMissionOptions.find((mission: any) => mission.team_key === e.target.value)
+                    setFormData({
+                      ...formData,
+                      team_key: e.target.value,
+                      mission_key: selected?.mission_key || formData.mission_key
+                    })
+                  }}
+                >
+                  <option value="">{language === 'zh' ? '自动使用当前 Mission Team' : 'Use mission team automatically'}</option>
+                  {teamMissionOptions
+                    .filter((mission: any) => mission.team_key && (!formData.mission_key || mission.mission_key === formData.mission_key))
+                    .map((mission: any) => (
+                      <option key={mission.team_key} value={mission.team_key}>
+                        {mission.team_name || mission.team_key}
+                      </option>
+                    ))}
+                </select>
+              </div>
             </div>
             <div className="form-group">
               <label className="form-label">{t.discussions.title}</label>

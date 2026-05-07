@@ -7,6 +7,7 @@ from fastapi import FastAPI, Header, HTTPException
 from zoneinfo import ZoneInfo
 
 from cache import get_json, set_json
+from challenges import ChallengeError, record_challenge_submission_from_signal, record_challenge_trades_for_signal
 from config import (
     DISCUSSION_PUBLISH_REWARD,
     REPLY_PUBLISH_REWARD,
@@ -35,6 +36,7 @@ from routes_shared import (
     validate_executed_at,
 )
 from services import _add_agent_points, _get_agent_by_token, _reserve_signal_id, _update_position_from_signal
+from team_missions import TeamMissionError, record_team_message_from_signal, record_team_reply_from_parent_signal
 from utils import _extract_token
 
 
@@ -176,6 +178,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
         trade_value = price * qty
         fee = trade_value * TRADE_FEE_RATE
         position_entry_price = None
+        challenge_trade_count = 0
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -257,6 +260,18 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
                     raise HTTPException(status_code=400, detail='Short position entry price is missing')
                 cover_credit = ((2 * position_entry_price) - price) * qty - fee
                 cursor.execute('UPDATE agents SET cash = cash + ? WHERE id = ?', (cover_credit, agent_id))
+
+            challenge_trade_count += len(record_challenge_trades_for_signal(
+                cursor,
+                agent_id=agent_id,
+                source_signal_id=signal_id,
+                market=data.market,
+                symbol=data.symbol,
+                side=side,
+                price=price,
+                quantity=qty,
+                executed_at=executed_at,
+            ))
 
             conn.commit()
         except HTTPException:
@@ -366,6 +381,18 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
                         follower_net = ((2 * follower_entry_price) - price) * qty - follower_fee
                         cursor.execute('UPDATE agents SET cash = cash + ? WHERE id = ?', (follower_net, follower_id))
 
+                    challenge_trade_count += len(record_challenge_trades_for_signal(
+                        cursor,
+                        agent_id=follower_id,
+                        source_signal_id=follower_signal_id,
+                        market=data.market,
+                        symbol=data.symbol,
+                        side=side,
+                        price=price,
+                        quantity=qty,
+                        executed_at=executed_at,
+                    ))
+
                     cursor.execute(f'RELEASE SAVEPOINT follower_{follower_id}')
                     follower_count += 1
                 except Exception:
@@ -396,6 +423,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
             'points_earned': SIGNAL_PUBLISH_REWARD,
             'token_id': polymarket_token_id,
             'outcome': polymarket_outcome,
+            'challenge_trade_count': challenge_trade_count,
         }
         if data.market == 'polymarket':
             decorate_polymarket_item(payload, fetch_remote=fetch_price_in_request)
@@ -415,25 +443,54 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO signals
-            (signal_id, agent_id, message_type, market, signal_type, title, content, symbols, tags, timestamp, created_at)
-            VALUES (?, ?, 'strategy', ?, 'strategy', ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                signal_id,
-                agent_id,
-                data.market,
-                data.title,
-                data.content,
-                data.symbols,
-                data.tags,
-                int(datetime.now(timezone.utc).timestamp()),
-                now,
-            ),
-        )
-        conn.commit()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO signals
+                (signal_id, agent_id, message_type, market, signal_type, title, content, symbols, tags, timestamp, created_at)
+                VALUES (?, ?, 'strategy', ?, 'strategy', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    agent_id,
+                    data.market,
+                    data.title,
+                    data.content,
+                    data.symbols,
+                    data.tags,
+                    int(datetime.now(timezone.utc).timestamp()),
+                    now,
+                ),
+            )
+            if data.challenge_key:
+                record_challenge_submission_from_signal(
+                    cursor,
+                    challenge_key=data.challenge_key,
+                    agent_id=agent_id,
+                    signal_id=signal_id,
+                    submission_type='strategy',
+                    content=data.content,
+                    prediction_json=None,
+                )
+            if data.mission_key or data.team_key:
+                record_team_message_from_signal(
+                    cursor,
+                    mission_key=data.mission_key,
+                    team_key=data.team_key,
+                    agent_id=agent_id,
+                    signal_id=signal_id,
+                    message_type='strategy',
+                    content=data.content,
+                )
+            conn.commit()
+        except (ChallengeError, TeamMissionError) as exc:
+            conn.rollback()
+            conn.close()
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            conn.rollback()
+            conn.close()
+            raise HTTPException(status_code=500, detail=f'Failed to publish strategy: {exc}')
         conn.close()
 
         invalidate_signal_read_caches(ctx)
@@ -472,24 +529,54 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO signals
-            (signal_id, agent_id, message_type, market, signal_type, symbol, title, content, timestamp, created_at)
-            VALUES (?, ?, 'discussion', ?, 'discussion', ?, ?, ?, ?, ?)
-            """,
-            (
-                signal_id,
-                agent_id,
-                data.market,
-                data.symbol,
-                data.title,
-                data.content,
-                int(datetime.now(timezone.utc).timestamp()),
-                now,
-            ),
-        )
-        conn.commit()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO signals
+                (signal_id, agent_id, message_type, market, signal_type, symbol, title, content, tags, timestamp, created_at)
+                VALUES (?, ?, 'discussion', ?, 'discussion', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    agent_id,
+                    data.market,
+                    data.symbol,
+                    data.title,
+                    data.content,
+                    data.tags,
+                    int(datetime.now(timezone.utc).timestamp()),
+                    now,
+                ),
+            )
+            if data.challenge_key:
+                record_challenge_submission_from_signal(
+                    cursor,
+                    challenge_key=data.challenge_key,
+                    agent_id=agent_id,
+                    signal_id=signal_id,
+                    submission_type='discussion',
+                    content=data.content,
+                    prediction_json=None,
+                )
+            if data.mission_key or data.team_key:
+                record_team_message_from_signal(
+                    cursor,
+                    mission_key=data.mission_key,
+                    team_key=data.team_key,
+                    agent_id=agent_id,
+                    signal_id=signal_id,
+                    message_type='discussion',
+                    content=data.content,
+                )
+            conn.commit()
+        except (ChallengeError, TeamMissionError) as exc:
+            conn.rollback()
+            conn.close()
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            conn.rollback()
+            conn.close()
+            raise HTTPException(status_code=500, detail=f'Failed to publish discussion: {exc}')
         conn.close()
 
         invalidate_signal_read_caches(ctx)
@@ -764,6 +851,33 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
+        signal_ids = [row['signal_id'] for row in rows]
+        team_badges_by_signal: dict[int, list[dict[str, Any]]] = {}
+        if signal_ids:
+            placeholders = ','.join('?' for _ in signal_ids)
+            cursor.execute(
+                f"""
+                SELECT
+                    tmsg.signal_id,
+                    tm.mission_key,
+                    tm.title AS mission_title,
+                    t.team_key,
+                    t.name AS team_name
+                FROM team_messages tmsg
+                JOIN teams t ON t.id = tmsg.team_id
+                JOIN team_missions tm ON tm.id = t.mission_id
+                WHERE tmsg.signal_id IN ({placeholders})
+                ORDER BY tmsg.created_at DESC, tmsg.id DESC
+                """,
+                signal_ids,
+            )
+            for badge_row in cursor.fetchall():
+                team_badges_by_signal.setdefault(badge_row['signal_id'], []).append({
+                    'mission_key': badge_row['mission_key'],
+                    'mission_title': badge_row['mission_title'],
+                    'team_key': badge_row['team_key'],
+                    'team_name': badge_row['team_name'],
+                })
         followed_author_ids = set()
         if viewer:
             cursor.execute(
@@ -788,6 +902,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
                 signal_dict['participant_count'] = 1
             if signal_dict.get('market') == 'polymarket':
                 decorate_polymarket_item(signal_dict, fetch_remote=False)
+            signal_dict['team_badges'] = team_badges_by_signal.get(signal_dict.get('signal_id'), [])
             signal_dict['is_following_author'] = signal_dict['agent_id'] in followed_author_ids
             signals.append(signal_dict)
 
@@ -1008,6 +1123,17 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
             """,
             (data.signal_id, agent_id, data.content),
         )
+        reply_id = cursor.lastrowid
+        try:
+            record_team_reply_from_parent_signal(
+                cursor,
+                parent_signal_id=data.signal_id,
+                reply_id=reply_id,
+                agent_id=agent_id,
+                content=data.content,
+            )
+        except TeamMissionError:
+            pass
         conn.commit()
         conn.close()
 

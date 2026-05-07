@@ -579,6 +579,301 @@ a {
   border-top: 1px solid var(--border-color);
 }
 
+.challenge-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.challenge-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 28px;
+  border: 1px solid rgba(214, 175, 110, 0.14);
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(16, 24, 31, 0.96), rgba(12, 18, 24, 0.88)),
+    linear-gradient(90deg, rgba(212, 164, 88, 0.09), transparent 58%);
+  box-shadow: var(--shadow-sm);
+}
+
+.challenge-kicker,
+.challenge-list-meta,
+.challenge-section-header,
+.challenge-rule-stack div,
+.challenge-submission-item div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.challenge-kicker span,
+.challenge-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 10px;
+  border: 1px solid rgba(214, 175, 110, 0.16);
+  border-radius: 999px;
+  color: #d8caa7;
+  background: rgba(18, 27, 34, 0.72);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+}
+
+.challenge-title {
+  margin-top: 14px;
+  color: var(--text-primary);
+  font-size: 34px;
+  line-height: 1.1;
+  letter-spacing: -0.04em;
+}
+
+.challenge-copy {
+  max-width: 760px;
+  margin-top: 10px;
+  color: var(--text-secondary);
+}
+
+.challenge-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.challenge-metrics-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.challenge-metrics-strip div,
+.challenge-panel,
+.challenge-list-item {
+  border: 1px solid rgba(214, 175, 110, 0.1);
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(12, 18, 24, 0.94), rgba(10, 15, 20, 0.9));
+  box-shadow: var(--shadow-sm);
+}
+
+.challenge-metrics-strip div {
+  padding: 16px;
+}
+
+.challenge-metrics-strip span,
+.challenge-rule-stack span,
+.challenge-list-meta,
+.challenge-submission-item time {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.challenge-metrics-strip strong,
+.challenge-rule-stack strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-primary);
+  font-size: 18px;
+}
+
+.challenge-tabs {
+  display: inline-flex;
+  width: fit-content;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(214, 175, 110, 0.12);
+  border-radius: 999px;
+  background: rgba(14, 20, 26, 0.72);
+}
+
+.challenge-tabs button {
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.challenge-tabs button.active {
+  color: #10161d;
+  background: var(--accent-gradient);
+}
+
+.challenge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.challenge-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px;
+}
+
+.challenge-list-title {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--text-primary);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.challenge-list-meta {
+  margin-top: 8px;
+}
+
+.challenge-list-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.challenge-create-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.challenge-create-grid .btn {
+  justify-content: center;
+}
+
+.challenge-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 20px;
+}
+
+.challenge-panel {
+  padding: 22px;
+}
+
+.challenge-panel-main {
+  min-width: 0;
+}
+
+.challenge-section-header {
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.challenge-section-header h2 {
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+.challenge-leaderboard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.challenge-rank-row {
+  display: grid;
+  grid-template-columns: 56px minmax(140px, 1fr) repeat(4, minmax(84px, auto));
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: rgba(18, 27, 34, 0.62);
+  font-size: 13px;
+}
+
+.challenge-rank-row.disqualified {
+  opacity: 0.72;
+}
+
+.challenge-rank-number,
+.challenge-agent-name {
+  font-weight: 700;
+}
+
+.challenge-positive {
+  color: var(--success);
+  font-weight: 700;
+}
+
+.challenge-negative {
+  color: var(--error);
+  font-weight: 700;
+}
+
+.challenge-rule-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.challenge-rule-stack div {
+  justify-content: space-between;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.challenge-rules-json {
+  margin-top: 16px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  color: var(--text-secondary);
+  background: rgba(7, 11, 16, 0.54);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+}
+
+.challenge-submit-form {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.challenge-submit-form .btn {
+  width: fit-content;
+}
+
+.challenge-submission-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.challenge-submission-item {
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: rgba(18, 27, 34, 0.58);
+}
+
+.challenge-submission-item div {
+  justify-content: space-between;
+}
+
+.challenge-submission-item p {
+  margin-top: 8px;
+  color: var(--text-secondary);
+}
+
+:root[data-theme='light'] .challenge-hero,
+:root[data-theme='light'] .challenge-panel,
+:root[data-theme='light'] .challenge-list-item,
+:root[data-theme='light'] .challenge-metrics-strip div {
+  background: linear-gradient(180deg, rgba(248, 243, 234, 0.96), rgba(243, 237, 227, 0.94));
+  border-color: rgba(108, 87, 58, 0.12);
+}
+
 .tags {
   display: flex;
   gap: 8px;
@@ -2112,6 +2407,299 @@ a {
   padding: 28px;
 }
 
+.team-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.team-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 22px;
+  padding: 28px;
+  border: 1px solid rgba(214, 175, 110, 0.14);
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 29, 0.96), rgba(10, 16, 21, 0.9)),
+    linear-gradient(90deg, rgba(143, 193, 157, 0.08), transparent 44%),
+    linear-gradient(270deg, rgba(212, 164, 88, 0.08), transparent 58%);
+  box-shadow: var(--shadow-sm);
+}
+
+.team-kicker,
+.team-list-meta,
+.team-section-header,
+.team-submission-item div,
+.team-actions,
+.team-signal-badges {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.team-kicker span,
+.team-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 10px;
+  border: 1px solid rgba(214, 175, 110, 0.16);
+  border-radius: 999px;
+  color: #d8caa7;
+  background: rgba(18, 27, 34, 0.72);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+}
+
+.team-title {
+  margin-top: 14px;
+  color: var(--text-primary);
+  font-size: 34px;
+  line-height: 1.1;
+  letter-spacing: -0.04em;
+}
+
+.team-copy {
+  max-width: 780px;
+  margin-top: 10px;
+  color: var(--text-secondary);
+}
+
+.team-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.team-metrics div,
+.team-panel,
+.team-list-item {
+  border: 1px solid rgba(214, 175, 110, 0.1);
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(12, 18, 24, 0.94), rgba(10, 15, 20, 0.9));
+  box-shadow: var(--shadow-sm);
+}
+
+.team-metrics div {
+  padding: 16px;
+}
+
+.team-metrics span,
+.team-list-meta,
+.team-submission-item time {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.team-metrics strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-primary);
+  font-size: 18px;
+}
+
+.team-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 20px;
+}
+
+.team-panel {
+  padding: 22px;
+}
+
+.team-panel-main {
+  min-width: 0;
+}
+
+.team-section-header {
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.team-section-header h2 {
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+.team-tabs {
+  display: inline-flex;
+  width: fit-content;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(214, 175, 110, 0.12);
+  border-radius: 999px;
+  background: rgba(14, 20, 26, 0.72);
+}
+
+.team-tabs button {
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.team-tabs button.active {
+  color: #10161d;
+  background: var(--accent-gradient);
+}
+
+.team-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.team-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px;
+}
+
+.team-list-title {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--text-primary);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.team-list-meta {
+  margin-top: 8px;
+}
+
+.team-create-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.team-create-grid .btn {
+  justify-content: center;
+}
+
+.team-member-list,
+.team-message-list,
+.team-submission-list,
+.team-leaderboard,
+.team-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.team-member-row,
+.team-message-row,
+.team-rank-row {
+  display: grid;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: rgba(18, 27, 34, 0.62);
+  font-size: 13px;
+}
+
+.team-member-row {
+  grid-template-columns: minmax(0, 1fr) 110px 150px;
+}
+
+.team-message-row {
+  grid-template-columns: 100px minmax(0, 1fr) 84px;
+}
+
+.team-rank-row {
+  grid-template-columns: 56px minmax(150px, 1fr) repeat(3, minmax(96px, auto));
+}
+
+.team-submission-item {
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: rgba(18, 27, 34, 0.58);
+}
+
+.team-submission-item div {
+  justify-content: space-between;
+}
+
+.team-submission-item p {
+  margin-top: 8px;
+  color: var(--text-secondary);
+}
+
+.team-link-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px auto;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.team-binding-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.team-signal-badges {
+  margin-bottom: 12px;
+}
+
+.team-signal-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 5px 9px;
+  border: 1px solid rgba(143, 193, 157, 0.2);
+  border-radius: 999px;
+  background: rgba(143, 193, 157, 0.08);
+  color: #b7d5b9;
+  font-size: 12px;
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+.team-signal-badge a {
+  color: inherit;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-signal-badge a + a::before {
+  content: '/';
+  margin-right: 6px;
+  color: var(--text-muted);
+}
+
+:root[data-theme='light'] .team-hero,
+:root[data-theme='light'] .team-panel,
+:root[data-theme='light'] .team-list-item,
+:root[data-theme='light'] .team-metrics div,
+:root[data-theme='light'] .team-member-row,
+:root[data-theme='light'] .team-message-row,
+:root[data-theme='light'] .team-rank-row,
+:root[data-theme='light'] .team-submission-item {
+  background: linear-gradient(180deg, rgba(248, 243, 234, 0.96), rgba(243, 237, 227, 0.94));
+  border-color: rgba(108, 87, 58, 0.12);
+}
+
+:root[data-theme='light'] .team-signal-badge {
+  color: #54705b;
+  background: rgba(143, 193, 157, 0.16);
+  border-color: rgba(84, 112, 91, 0.18);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .landing-shell,
@@ -2150,6 +2738,42 @@ a {
 
   .signal-grid {
     grid-template-columns: 1fr;
+  }
+
+  .challenge-hero,
+  .challenge-list-item,
+  .team-hero,
+  .team-list-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .challenge-metrics-strip,
+  .challenge-detail-grid,
+  .challenge-create-grid,
+  .team-metrics,
+  .team-grid,
+  .team-create-grid,
+  .team-binding-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .challenge-rank-row,
+  .team-rank-row,
+  .team-member-row,
+  .team-message-row,
+  .team-link-form {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .challenge-rank-row span:nth-child(n + 3) {
+    grid-column: 2;
+  }
+
+  .team-rank-row span:nth-child(n + 3),
+  .team-member-row span:nth-child(n + 2),
+  .team-message-row span:nth-child(n + 3) {
+    grid-column: 2;
   }
 
   .intel-status-strip,

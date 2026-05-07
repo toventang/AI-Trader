@@ -28,6 +28,16 @@ from services import _get_agent_by_token
 from utils import _extract_token
 
 
+INITIAL_CAPITAL = 100000.0
+
+
+def profit_percent_for_display(profit: float, deposited: float) -> float:
+    base_capital = INITIAL_CAPITAL + (deposited or 0)
+    if base_capital <= 0:
+        return 0.0
+    return clamp_profit_for_display(profit) / base_capital * 100
+
+
 def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
     @app.get('/api/profit/history')
     async def get_profit_history(
@@ -44,6 +54,7 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
         now_ts = time.time()
         redis_cache_key = (
             f'{LEADERBOARD_CACHE_KEY_PREFIX}:'
+            f'metric=return_percent:'
             f'limit={limit}:days={days}:offset={offset}:history={int(include_history)}'
         )
 
@@ -77,6 +88,7 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
             SELECT
                 a.id AS agent_id,
                 a.name,
+                COALESCE(a.deposited, 0) AS deposited,
                 (
                     COALESCE(a.cash, 0) +
                     COALESCE(
@@ -89,8 +101,24 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
                         ),
                         0
                     ) -
-                    (100000.0 + COALESCE(a.deposited, 0))
+                    (? + COALESCE(a.deposited, 0))
                 ) AS profit,
+                (
+                    (
+                        COALESCE(a.cash, 0) +
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN p.current_price IS NULL THEN p.entry_price * ABS(p.quantity)
+                                    WHEN p.side = 'long' THEN p.current_price * ABS(p.quantity)
+                                    ELSE (2 * p.entry_price - p.current_price) * ABS(p.quantity)
+                                END
+                            ),
+                            0
+                        ) -
+                        (? + COALESCE(a.deposited, 0))
+                    ) / NULLIF((? + COALESCE(a.deposited, 0)), 0) * 100
+                ) AS profit_percent,
                 (
                     SELECT MAX(ph.recorded_at)
                     FROM profit_history ph
@@ -99,16 +127,18 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
             FROM agents a
             LEFT JOIN positions p ON p.agent_id = a.id
             GROUP BY a.id, a.name, a.cash, a.deposited
-            ORDER BY profit DESC
+            ORDER BY profit_percent DESC
             LIMIT ? OFFSET ?
             """,
-            (cutoff, limit, offset),
+            (INITIAL_CAPITAL, INITIAL_CAPITAL, INITIAL_CAPITAL, cutoff, limit, offset),
         )
         top_agents = [
             {
                 'agent_id': row['agent_id'],
                 'name': row['name'],
+                'deposited': row['deposited'],
                 'profit': clamp_profit_for_display(row['profit']),
+                'profit_percent': row['profit_percent'] or 0,
                 'recorded_at': row['recorded_at'] or live_snapshot_recorded_at,
             }
             for row in cursor.fetchall()
@@ -161,21 +191,30 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
                 )
                 history = cursor.fetchall()
                 history_points = [
-                    {'profit': clamp_profit_for_display(h['profit']), 'recorded_at': h['recorded_at']}
+                    {
+                        'profit': clamp_profit_for_display(h['profit']),
+                        'profit_percent': profit_percent_for_display(h['profit'], agent['deposited']),
+                        'recorded_at': h['recorded_at'],
+                    }
                     for h in history
                 ]
 
             if include_history and (not history_points or history_points[-1]['recorded_at'] != live_snapshot_recorded_at):
                 history_points.append({
                     'profit': clamp_profit_for_display(agent['profit']),
+                    'profit_percent': profit_percent_for_display(agent['profit'], agent['deposited']),
                     'recorded_at': live_snapshot_recorded_at,
                 })
 
+            current_profit_percent = profit_percent_for_display(agent['profit'], agent['deposited'])
             result.append({
                 'agent_id': agent['agent_id'],
                 'name': agent['name'],
+                'deposited': agent['deposited'],
                 'total_profit': clamp_profit_for_display(agent['profit']),
                 'current_profit': clamp_profit_for_display(agent['profit']),
+                'total_profit_percent': current_profit_percent,
+                'current_profit_percent': current_profit_percent,
                 'trade_count': trade_counts.get(agent['agent_id'], 0),
                 'recent_strategy_count_7d': 0,
                 'recent_discussion_count_7d': 0,
