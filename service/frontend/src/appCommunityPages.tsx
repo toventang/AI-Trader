@@ -251,6 +251,31 @@ function SignalCard({
         </div>
       )}
 
+      {(signal.quality_score !== null && signal.quality_score !== undefined) || signal.reward_reason || signal.accepted_reply_count ? (
+        <div className="experiment-signal-badges">
+          {signal.quality_score !== null && signal.quality_score !== undefined && (
+            <span className="experiment-signal-badge">
+              {language === 'zh' ? '质量' : 'Quality'} {Number(signal.quality_score || 0).toFixed(2)}
+            </span>
+          )}
+          {signal.accepted_reply_count ? (
+            <span className="experiment-signal-badge">
+              {language === 'zh' ? '已采纳' : 'Accepted'} {signal.accepted_reply_count}
+            </span>
+          ) : null}
+          {signal.reward_reason && (
+            <span className="experiment-signal-badge">
+              {signal.reward_reason} {signal.reward_points ? `+${signal.reward_points}` : ''}
+            </span>
+          )}
+          {signal.reward_experiment_key && (
+            <span className="experiment-signal-badge">
+              {signal.reward_experiment_key}/{signal.reward_variant_key || '-'}
+            </span>
+          )}
+        </div>
+      ) : null}
+
       <p className="signal-content">{signal.content}</p>
 
       <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', fontSize: '12px', color: 'var(--text-muted)', marginTop: '8px' }}>
@@ -1159,6 +1184,13 @@ export function LoginPage({ onLogin }: { onLogin: (token: string) => void }) {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setLoading(true)
+    const agentName = name.trim()
+
+    if (!agentName) {
+      alert(language === 'zh' ? '请输入 Agent 名称' : 'Enter an agent name')
+      setLoading(false)
+      return
+    }
 
     try {
       const res = await fetch(`${API_BASE}/claw/agents/login`, {
@@ -1171,7 +1203,7 @@ export function LoginPage({ onLogin }: { onLogin: (token: string) => void }) {
       if (data.token) {
         onLogin(data.token)
       } else {
-        alert(data.message || t.login.failed)
+        alert(data.detail || data.message || t.login.failed)
       }
     } catch (e) {
       console.error(e)
@@ -1237,6 +1269,13 @@ export function RegisterPage({ onLogin }: { onLogin: (token: string) => void }) 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setLoading(true)
+    const agentName = name.trim()
+
+    if (!agentName) {
+      alert(language === 'zh' ? '请输入 Agent 名称' : 'Enter an agent name')
+      setLoading(false)
+      return
+    }
 
     if (password !== confirmPassword) {
       alert(language === 'zh' ? '两次输入的密码不一致' : 'Passwords do not match')
@@ -1248,14 +1287,14 @@ export function RegisterPage({ onLogin }: { onLogin: (token: string) => void }) 
       const res = await fetch(`${API_BASE}/claw/agents/selfRegister`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, password })
+        body: JSON.stringify({ name: agentName, email, password })
       })
       const data = await res.json()
 
       if (data.token) {
         onLogin(data.token)
       } else {
-        alert(data.message || t.login.failed)
+        alert(data.detail || data.message || t.login.failed)
       }
     } catch (e) {
       console.error(e)
