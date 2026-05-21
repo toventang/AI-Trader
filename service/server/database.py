@@ -377,12 +377,26 @@ def init_database():
             token_expires_at TEXT,
             password_hash TEXT,
             wallet_address TEXT,
+            role TEXT DEFAULT 'agent',
             points INTEGER DEFAULT 0,
             cash REAL DEFAULT 100000.0,
             deposited REAL DEFAULT 0.0,
             reputation_score INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_leaderboard_exclusions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id INTEGER NOT NULL UNIQUE,
+            reason TEXT NOT NULL,
+            details_json TEXT,
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
         )
     """)
 
@@ -1102,6 +1116,12 @@ def init_database():
     except Exception:
         pass
 
+    # Add role column if it doesn't exist (for existing databases)
+    try:
+        cursor.execute("ALTER TABLE agents ADD COLUMN role TEXT DEFAULT 'agent'")
+    except Exception:
+        pass
+
     # Add password_reset_token column if it doesn't exist (for existing databases)
     try:
         cursor.execute("ALTER TABLE agents ADD COLUMN password_reset_token TEXT")
@@ -1163,6 +1183,11 @@ def init_database():
     """)
 
     cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_leaderboard_exclusions_active
+        ON agent_leaderboard_exclusions(active, agent_id)
+    """)
+
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_positions_agent ON positions(agent_id)
     """)
 
@@ -1196,6 +1221,16 @@ def init_database():
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_signals_polymarket_token
         ON signals(market, token_id)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_messages_agent_read_created
+        ON agent_messages(agent_id, read, created_at)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_messages_agent_type_created
+        ON agent_messages(agent_id, type, created_at)
     """)
 
     cursor.execute("""
