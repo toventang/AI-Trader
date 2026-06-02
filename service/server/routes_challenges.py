@@ -24,6 +24,7 @@ from experiment_notifications import (
     resolve_challenge_notification_targets,
     send_agent_notifications,
 )
+from permissions import require_admin
 from routes_models import (
     ChallengeCreateRequest,
     ChallengeJoinRequest,
@@ -69,7 +70,7 @@ def register_challenge_routes(app: FastAPI, ctx: RouteContext) -> None:
 
     @app.post('/api/challenges')
     async def api_create_challenge(data: ChallengeCreateRequest, authorization: str = Header(None)):
-        agent = _require_agent(authorization)
+        agent = require_admin(authorization)
         try:
             return create_challenge(data, agent['id'])
         except Exception as exc:

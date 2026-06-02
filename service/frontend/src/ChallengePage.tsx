@@ -5,6 +5,7 @@ import { API_BASE, MARKETS, useLanguage } from './appShared'
 
 type ChallengePageProps = {
   token?: string | null
+  canAdmin?: boolean
 }
 
 const statusValues = ['upcoming', 'active', 'settled'] as const
@@ -33,7 +34,7 @@ function marketLabel(value: string, language: string) {
   return MARKETS.find((market) => market.value === value)?.[language === 'zh' ? 'labelZh' : 'label'] || value
 }
 
-export function ChallengePage({ token }: ChallengePageProps) {
+export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
   const { challengeKey } = useParams()
   const { language } = useLanguage()
   const [status, setStatus] = useState<'upcoming' | 'active' | 'settled'>('active')
@@ -134,6 +135,12 @@ export function ChallengePage({ token }: ChallengePageProps) {
     loadMyChallenges()
   }, [challengeKey, status, token])
 
+  useEffect(() => {
+    if (!canAdmin) {
+      setShowCreate(false)
+    }
+  }, [canAdmin])
+
   const handleJoin = async (key: string) => {
     if (!token) return
     setBusy(true)
@@ -158,7 +165,7 @@ export function ChallengePage({ token }: ChallengePageProps) {
 
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault()
-    if (!token) return
+    if (!token || !canAdmin) return
     setBusy(true)
     try {
       const endAt = createForm.end_at ? new Date(createForm.end_at).toISOString() : undefined
@@ -379,7 +386,7 @@ export function ChallengePage({ token }: ChallengePageProps) {
             {language === 'zh' ? '报名、提交、结算和导出都围绕可复现实验记录运行' : 'Enroll, submit, settle, and export reproducible competition records'}
           </p>
         </div>
-        {token && (
+        {canAdmin && (
           <button className="btn btn-primary" onClick={() => setShowCreate(!showCreate)}>
             {language === 'zh' ? '创建挑战' : 'Create challenge'}
           </button>
@@ -399,7 +406,7 @@ export function ChallengePage({ token }: ChallengePageProps) {
         ))}
       </div>
 
-      {showCreate && (
+      {canAdmin && showCreate && (
         <section className="challenge-panel">
           <form className="challenge-create-grid" onSubmit={handleCreate}>
             <input
@@ -520,4 +527,3 @@ export function ChallengePage({ token }: ChallengePageProps) {
     </div>
   )
 }
-
