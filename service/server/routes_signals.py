@@ -1097,26 +1097,6 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
             params.extend([viewer['id'], viewer['id']])
 
         where_clause = ' AND '.join(conditions) if conditions else '1=1'
-        if sort in ('active', 'following') and viewer:
-            order_clause = """
-                COALESCE(
-                    (SELECT MAX(sr.created_at) FROM signal_replies sr WHERE sr.signal_id = s.signal_id),
-                    s.created_at
-                ) DESC,
-                (SELECT COUNT(*) FROM signal_replies sr WHERE sr.signal_id = s.signal_id) DESC,
-                s.created_at DESC
-            """
-        elif sort == 'active':
-            order_clause = """
-                COALESCE(
-                    (SELECT MAX(sr.created_at) FROM signal_replies sr WHERE sr.signal_id = s.signal_id),
-                    s.created_at
-                ) DESC,
-                (SELECT COUNT(*) FROM signal_replies sr WHERE sr.signal_id = s.signal_id) DESC,
-                s.created_at DESC
-            """
-        else:
-            order_clause = 's.created_at DESC'
 
         count_query = f"""
             SELECT COUNT(*) AS total
@@ -1128,22 +1108,89 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
         total_row = cursor.fetchone()
         total = total_row['total'] if total_row else 0
 
-        query = f"""
-            SELECT
-                s.*,
-                a.name as agent_name,
-                (SELECT COUNT(*) FROM signal_replies sr WHERE sr.signal_id = s.signal_id) as reply_count,
-                (SELECT MAX(sr.created_at) FROM signal_replies sr WHERE sr.signal_id = s.signal_id) as last_reply_at,
-                (SELECT COUNT(DISTINCT sr.agent_id) + 1 FROM signal_replies sr WHERE sr.signal_id = s.signal_id) as participant_count
-            FROM signals s
-            JOIN agents a ON a.id = s.agent_id
-            WHERE {where_clause}
-            ORDER BY {order_clause}
-            LIMIT ? OFFSET ?
-        """
-        params.extend([limit, offset])
+        if sort in ('active', 'following'):
+            active_window = max(limit + offset, limit)
+            query = f"""
+                WITH reply_stats AS (
+                    SELECT
+                        signal_id,
+                        COUNT(*) AS reply_count,
+                        MAX(created_at) AS last_reply_at,
+                        COUNT(DISTINCT agent_id) + 1 AS participant_count
+                    FROM signal_replies
+                    GROUP BY signal_id
+                ),
+                recent_signal_ids AS (
+                    SELECT s.signal_id
+                    FROM signals s
+                    JOIN agents a ON a.id = s.agent_id
+                    WHERE {where_clause}
+                    ORDER BY s.created_at DESC
+                    LIMIT ?
+                ),
+                active_signal_ids AS (
+                    SELECT s.signal_id
+                    FROM signals s
+                    JOIN agents a ON a.id = s.agent_id
+                    JOIN reply_stats rs ON rs.signal_id = s.signal_id
+                    WHERE {where_clause}
+                ),
+                candidate_signal_ids AS (
+                    SELECT signal_id FROM recent_signal_ids
+                    UNION
+                    SELECT signal_id FROM active_signal_ids
+                )
+                SELECT
+                    s.*,
+                    a.name as agent_name,
+                    COALESCE(rs.reply_count, 0) as reply_count,
+                    rs.last_reply_at as last_reply_at,
+                    COALESCE(rs.participant_count, 1) as participant_count
+                FROM candidate_signal_ids c
+                JOIN signals s ON s.signal_id = c.signal_id
+                JOIN agents a ON a.id = s.agent_id
+                LEFT JOIN reply_stats rs ON rs.signal_id = s.signal_id
+                ORDER BY
+                    COALESCE(rs.last_reply_at, s.created_at) DESC,
+                    COALESCE(rs.reply_count, 0) DESC,
+                    s.created_at DESC
+                LIMIT ? OFFSET ?
+            """
+            query_params = [*params, active_window, *params, limit, offset]
+        else:
+            query = f"""
+                WITH paged_signals AS (
+                    SELECT s.*
+                    FROM signals s
+                    JOIN agents a ON a.id = s.agent_id
+                    WHERE {where_clause}
+                    ORDER BY s.created_at DESC
+                    LIMIT ? OFFSET ?
+                ),
+                reply_stats AS (
+                    SELECT
+                        sr.signal_id,
+                        COUNT(*) AS reply_count,
+                        MAX(sr.created_at) AS last_reply_at,
+                        COUNT(DISTINCT sr.agent_id) + 1 AS participant_count
+                    FROM signal_replies sr
+                    WHERE sr.signal_id IN (SELECT signal_id FROM paged_signals)
+                    GROUP BY sr.signal_id
+                )
+                SELECT
+                    s.*,
+                    a.name as agent_name,
+                    COALESCE(rs.reply_count, 0) as reply_count,
+                    rs.last_reply_at as last_reply_at,
+                    COALESCE(rs.participant_count, 1) as participant_count
+                FROM paged_signals s
+                JOIN agents a ON a.id = s.agent_id
+                LEFT JOIN reply_stats rs ON rs.signal_id = s.signal_id
+                ORDER BY s.created_at DESC
+            """
+            query_params = [*params, limit, offset]
 
-        cursor.execute(query, params)
+        cursor.execute(query, query_params)
         rows = cursor.fetchall()
         signal_ids = [row['signal_id'] for row in rows]
         team_badges_by_signal: dict[int, list[dict[str, Any]]] = {}

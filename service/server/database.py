@@ -1224,6 +1224,21 @@ def init_database():
     """)
 
     cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_signal_replies_signal_created
+        ON signal_replies(signal_id, created_at DESC)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_signal_replies_signal_agent
+        ON signal_replies(signal_id, agent_id)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_subscriptions_follower_status_leader
+        ON subscriptions(follower_id, status, leader_id)
+    """)
+
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_agent_messages_agent_read_created
         ON agent_messages(agent_id, read, created_at)
     """)
