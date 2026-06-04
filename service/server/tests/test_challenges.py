@@ -13,9 +13,12 @@ if str(SERVER_DIR) not in sys.path:
 
 import database
 from challenges import (
+    ChallengeError,
+    create_challenge_trade,
+    get_agent_challenge_portfolio,
     create_challenge,
     join_challenge,
-    record_challenge_trades_for_signal,
+    list_challenges,
     settle_challenge,
     settle_due_challenges,
 )
@@ -75,43 +78,26 @@ class ChallengeTests(unittest.TestCase):
         payload.update(overrides)
         return create_challenge(payload, self.agent_1)
 
-    def _insert_trade_signal(self, agent_id: int, signal_id: int, side: str, price: float, quantity: float):
-        executed_at = iso(datetime.now(timezone.utc))
-        conn = database.get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO signals
-            (signal_id, agent_id, message_type, market, signal_type, symbol, side,
-             entry_price, quantity, content, timestamp, created_at, executed_at)
-            VALUES (?, ?, 'operation', 'crypto', 'realtime', 'BTC', ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                signal_id,
-                agent_id,
-                side,
-                price,
-                quantity,
-                f"{side} BTC",
-                int(datetime.now(timezone.utc).timestamp()),
-                utc_now_iso_z(),
-                executed_at,
-            ),
-        )
-        recorded = record_challenge_trades_for_signal(
-            cursor,
+    def _submit_challenge_trade(
+        self,
+        challenge_key: str,
+        agent_id: int,
+        side: str,
+        price: float,
+        quantity: float,
+        symbol: str = "BTC",
+    ):
+        return create_challenge_trade(
+            challenge_key,
             agent_id=agent_id,
-            source_signal_id=signal_id,
-            market="crypto",
-            symbol="BTC",
-            side=side,
-            price=price,
-            quantity=quantity,
-            executed_at=executed_at,
+            data={
+                "symbol": symbol,
+                "side": side,
+                "price": price,
+                "quantity": quantity,
+                "executed_at": iso(datetime.now(timezone.utc)),
+            },
         )
-        conn.commit()
-        conn.close()
-        return recorded
 
     def test_create_and_join_challenge_is_idempotent(self):
         challenge = self._create_active_challenge(challenge_key="join-check")
@@ -131,32 +117,66 @@ class ChallengeTests(unittest.TestCase):
         self.assertIn("challenge_created", [row["event_type"] for row in cursor.fetchall()])
         conn.close()
 
-    def test_operation_signal_records_challenge_trade_snapshot(self):
-        challenge = self._create_active_challenge(challenge_key="trade-mirror")
+    def test_challenges_are_filtered_by_track(self):
+        self._create_active_challenge(challenge_key="track-crypto", market="crypto", symbol="BTC")
+        self._create_active_challenge(challenge_key="track-stock", market="us-stock", symbol="AAPL")
+        self._create_active_challenge(challenge_key="track-polymarket", market="polymarket", symbol="election-market")
+
+        all_tracks = list_challenges(status="active", market="all")
+        self.assertEqual(all_tracks["total"], 3)
+
+        stock_track = list_challenges(status="active", market="us-stock")
+        self.assertEqual(stock_track["total"], 1)
+        self.assertEqual(stock_track["challenges"][0]["challenge_key"], "track-stock")
+        self.assertEqual(stock_track["challenges"][0]["market"], "us-stock")
+
+        polymarket_track = list_challenges(status="active", market="polymarket")
+        self.assertEqual(polymarket_track["total"], 1)
+        self.assertEqual(polymarket_track["challenges"][0]["challenge_key"], "track-polymarket")
+
+    def test_challenge_track_must_be_supported(self):
+        with self.assertRaises(ChallengeError):
+            self._create_active_challenge(challenge_key="track-forex", market="forex", symbol="EURUSD")
+
+        with self.assertRaises(ChallengeError):
+            list_challenges(status="active", market="forex")
+
+    def test_dedicated_challenge_trade_records_isolated_snapshot_and_portfolio(self):
+        challenge = self._create_active_challenge(challenge_key="dedicated-trade")
         join_challenge(challenge["challenge_key"], self.agent_2)
 
-        recorded = self._insert_trade_signal(self.agent_2, 101, "buy", 100.0, 2.0)
+        result = self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "buy", 100.0, 2.0)
 
-        self.assertEqual(len(recorded), 1)
+        self.assertIsNone(result["trade"]["source_signal_id"])
+        self.assertEqual(result["portfolio"]["trade_count"], 1)
+        self.assertAlmostEqual(result["portfolio"]["cash"], 800.0)
+        self.assertEqual(result["portfolio"]["positions"][0]["quantity"], 2.0)
         conn = database.get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM challenge_trades WHERE source_signal_id = ?", (101,))
+        cursor.execute("SELECT * FROM challenge_trades WHERE source_signal_id IS NULL")
         row = cursor.fetchone()
         self.assertIsNotNone(row)
         self.assertEqual(row["challenge_id"], challenge["id"])
         self.assertEqual(row["agent_id"], self.agent_2)
-        cursor.execute("SELECT COUNT(*) AS count FROM experiment_events WHERE event_type = 'challenge_trade_recorded'")
+        cursor.execute("SELECT COUNT(*) AS count FROM positions WHERE agent_id = ?", (self.agent_2,))
+        self.assertEqual(cursor.fetchone()["count"], 0)
+        cursor.execute("SELECT cash FROM agents WHERE id = ?", (self.agent_2,))
+        self.assertEqual(cursor.fetchone()["cash"], 100000.0)
+        cursor.execute("SELECT COUNT(*) AS count FROM experiment_events WHERE event_type = 'challenge_trade_submitted'")
         self.assertEqual(cursor.fetchone()["count"], 1)
         conn.close()
+
+        portfolio = get_agent_challenge_portfolio(challenge["challenge_key"], self.agent_2)
+        self.assertEqual(portfolio["portfolio"]["trade_count"], 1)
 
     def test_due_challenge_settles_return_ranks_rewards_and_exports(self):
         challenge = self._create_active_challenge(challenge_key="settle-return")
         join_challenge(challenge["challenge_key"], self.agent_2)
         join_challenge(challenge["challenge_key"], self.agent_3)
-        self._insert_trade_signal(self.agent_2, 201, "buy", 100.0, 10.0)
-        self._insert_trade_signal(self.agent_2, 202, "sell", 110.0, 10.0)
-        self._insert_trade_signal(self.agent_3, 203, "buy", 100.0, 10.0)
-        self._insert_trade_signal(self.agent_3, 204, "sell", 105.0, 10.0)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "buy", 100.0, 10.0)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "sell", 110.0, 10.0)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_3, "buy", 100.0, 10.0)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_3, "sell", 105.0, 10.0)
 
         conn = database.get_db_connection()
         cursor = conn.cursor()
@@ -187,7 +207,7 @@ class ChallengeTests(unittest.TestCase):
         self.assertTrue({
             "challenge_created",
             "challenge_joined",
-            "challenge_trade_recorded",
+            "challenge_trade_submitted",
             "challenge_settled",
             "challenge_reward_granted",
         }.issubset(event_types))
@@ -199,6 +219,38 @@ class ChallengeTests(unittest.TestCase):
         with open(paths["challenge_results.csv"], newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
         self.assertEqual(len(rows), 2)
+
+    def test_return_only_settlement_records_max_drawdown(self):
+        challenge = self._create_active_challenge(challenge_key="return-drawdown")
+        join_challenge(challenge["challenge_key"], self.agent_2)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "buy", 100.0, 10.0)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "sell", 50.0, 1.0)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "sell", 120.0, 9.0)
+
+        result = settle_challenge(challenge["challenge_key"])
+        row = next(item for item in result["leaderboard"] if item["agent_id"] == self.agent_2)
+
+        self.assertAlmostEqual(row["return_pct"], 13.0)
+        self.assertAlmostEqual(row["max_drawdown"], 50.0)
+        self.assertAlmostEqual(row["final_score"], 13.0)
+
+        conn = database.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT cp.max_drawdown AS participant_drawdown,
+                   cr.max_drawdown AS result_drawdown
+            FROM challenge_participants cp
+            JOIN challenge_results cr ON cr.challenge_id = cp.challenge_id AND cr.agent_id = cp.agent_id
+            WHERE cp.challenge_id = ? AND cp.agent_id = ?
+            """,
+            (challenge["id"], self.agent_2),
+        )
+        stored = cursor.fetchone()
+        conn.close()
+        self.assertIsNotNone(stored)
+        self.assertAlmostEqual(stored["participant_drawdown"], 50.0)
+        self.assertAlmostEqual(stored["result_drawdown"], 50.0)
 
     def test_risk_adjusted_ranking_penalizes_drawdown(self):
         challenge = {
@@ -242,8 +294,8 @@ class ChallengeTests(unittest.TestCase):
         )
         join_challenge(challenge["challenge_key"], self.agent_2)
         join_challenge(challenge["challenge_key"], self.agent_3)
-        self._insert_trade_signal(self.agent_2, 301, "buy", 100.0, 10.0)
-        self._insert_trade_signal(self.agent_3, 302, "buy", 100.0, 1.0)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "buy", 100.0, 10.0)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_3, "buy", 100.0, 1.0)
         result = settle_challenge(challenge["challenge_key"])
 
         disqualified = next(row for row in result["leaderboard"] if row["agent_id"] == self.agent_2)
@@ -274,13 +326,10 @@ class ChallengeTests(unittest.TestCase):
         )
         agent_ids = [self._create_agent(f"bulk-agent-{idx}") for idx in range(20)]
 
-        signal_id = 400
         for idx, agent_id in enumerate(agent_ids):
             join_challenge(challenge["challenge_key"], agent_id)
-            self._insert_trade_signal(agent_id, signal_id, "buy", 100.0, 10.0)
-            signal_id += 1
-            self._insert_trade_signal(agent_id, signal_id, "sell", 100.0 + idx, 10.0)
-            signal_id += 1
+            self._submit_challenge_trade(challenge["challenge_key"], agent_id, "buy", 100.0, 10.0)
+            self._submit_challenge_trade(challenge["challenge_key"], agent_id, "sell", 100.0 + idx, 10.0)
 
         result = settle_challenge(challenge["challenge_key"])
         leaderboard = result["leaderboard"]

@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 
-import { API_BASE, COMMUNITY_FEED_PAGE_SIZE, MARKETS, useLanguage } from './appShared'
+import { AgentName, API_BASE, COMMUNITY_FEED_PAGE_SIZE, MARKETS, isVerifiedAgent, useLanguage } from './appShared'
 
 function AuthShell({
   mode,
@@ -216,7 +216,7 @@ function SignalCard({
       {signal.agent_name && (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
           <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-            {signal.agent_name}
+            <AgentName name={signal.agent_name} verified={isVerifiedAgent(signal, 'agent')} />
           </div>
           {canFollowAuthor && signal.agent_id && (
             isFollowingAuthor ? (
@@ -346,7 +346,12 @@ function SignalCard({
                     marginBottom: '8px'
                   }}>
                     <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '4px', display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'center' }}>
-                      <span>{reply.agent_name || reply.user_name || 'Anonymous'} • {new Date(reply.created_at).toLocaleString()}</span>
+                      <span>
+                        <AgentName
+                          name={reply.agent_name || reply.user_name || 'Anonymous'}
+                          verified={isVerifiedAgent(reply, 'agent')}
+                        /> • {new Date(reply.created_at).toLocaleString()}
+                      </span>
                       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                         {reply.accepted ? (
                           <span className="tag" style={{ background: 'rgba(34, 197, 94, 0.12)', color: '#16a34a' }}>

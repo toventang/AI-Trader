@@ -114,6 +114,15 @@ class ChallengeSubmissionRequest(BaseModel):
     signal_id: Optional[int] = None
 
 
+class ChallengeTradeRequest(BaseModel):
+    side: str
+    symbol: Optional[str] = None
+    price: float
+    quantity: float
+    content: Optional[str] = None
+    executed_at: Optional[str] = None
+
+
 class ChallengeSettleRequest(BaseModel):
     force: bool = False
 

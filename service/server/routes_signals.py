@@ -7,7 +7,7 @@ from fastapi import FastAPI, Header, HTTPException
 from zoneinfo import ZoneInfo
 
 from cache import get_json, set_json
-from challenges import ChallengeError, record_challenge_submission_from_signal, record_challenge_trades_for_signal
+from challenges import ChallengeError, record_challenge_submission_from_signal
 from config import (
     DISCUSSION_PUBLISH_REWARD,
     REPLY_PUBLISH_REWARD,
@@ -27,6 +27,8 @@ from routes_shared import (
     SIGNAL_FEED_CACHE_KEY_PREFIX,
     SIGNAL_FEED_CACHE_TTL_SECONDS,
     attach_experiment_unread_notice,
+    agent_identity_status,
+    agent_is_verified,
     decorate_polymarket_item,
     enforce_content_rate_limit,
     extract_mentions,
@@ -241,7 +243,6 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
         trade_value = price * qty
         fee = trade_value * TRADE_FEE_RATE
         position_entry_price = None
-        challenge_trade_count = 0
         reward_points = SIGNAL_PUBLISH_REWARD
         reward_context = experiment_contexts[0] if experiment_contexts else None
         reward_metadata: dict[str, Any] = {'reward_mode': 'fixed', 'base_points': SIGNAL_PUBLISH_REWARD}
@@ -327,17 +328,6 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
                 cover_credit = ((2 * position_entry_price) - price) * qty - fee
                 cursor.execute('UPDATE agents SET cash = cash + ? WHERE id = ?', (cover_credit, agent_id))
 
-            challenge_trade_count += len(record_challenge_trades_for_signal(
-                cursor,
-                agent_id=agent_id,
-                source_signal_id=signal_id,
-                market=market,
-                symbol=symbol,
-                side=side,
-                price=price,
-                quantity=qty,
-                executed_at=executed_at,
-            ))
             signal_quality = score_signal_quality(
                 {
                     'signal_id': signal_id,
@@ -494,17 +484,6 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
                         follower_net = ((2 * follower_entry_price) - price) * qty - follower_fee
                         cursor.execute('UPDATE agents SET cash = cash + ? WHERE id = ?', (follower_net, follower_id))
 
-                    challenge_trade_count += len(record_challenge_trades_for_signal(
-                        cursor,
-                        agent_id=follower_id,
-                        source_signal_id=follower_signal_id,
-                        market=market,
-                        symbol=symbol,
-                        side=side,
-                        price=price,
-                        quantity=qty,
-                        executed_at=executed_at,
-                    ))
                     score_signal_quality(
                         {
                             'signal_id': follower_signal_id,
@@ -567,7 +546,6 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
             'points_earned': reward_points,
             'token_id': polymarket_token_id,
             'outcome': polymarket_outcome,
-            'challenge_trade_count': challenge_trade_count,
         }
         if market == 'polymarket':
             decorate_polymarket_item(payload, fetch_remote=fetch_price_in_request)
@@ -867,6 +845,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
         now_ts = time.time()
         redis_cache_key = (
             f'{GROUPED_SIGNALS_CACHE_KEY_PREFIX}:'
+            f'v=identity-1:'
             f"message_type={(message_type or '').strip() or 'all'}:"
             f"market={(market or '').strip() or 'all'}:"
             f'limit={max(1, limit)}:'
@@ -912,6 +891,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
             SELECT
                 a.id as agent_id,
                 a.name as agent_name,
+                a.identity_status as agent_identity_status,
                 COUNT(s.id) as signal_count,
                 COALESCE(SUM(s.pnl), 0) as total_pnl,
                 MAX(s.created_at) as last_signal_at,
@@ -923,7 +903,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
                  ORDER BY s3.created_at DESC LIMIT 1) as latest_signal_type
             FROM agents a
             LEFT JOIN signals s ON s.agent_id = a.id AND {where_clause}
-            GROUP BY a.id
+            GROUP BY a.id, a.name, a.identity_status
             HAVING COUNT(s.id) > 0
             ORDER BY last_signal_at DESC
             LIMIT ? OFFSET ?
@@ -981,6 +961,8 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
             agents.append({
                 'agent_id': agent_id,
                 'agent_name': row['agent_name'],
+                'agent_identity_status': agent_identity_status(row),
+                'agent_is_verified': agent_is_verified(row),
                 'signal_count': row['signal_count'],
                 'total_pnl': row['total_pnl'],
                 'position_pnl': total_position_pnl,
@@ -1003,7 +985,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT r.*, a.name as agent_name
+            SELECT r.*, a.name as agent_name, a.identity_status as agent_identity_status
             FROM signal_replies r
             JOIN agents a ON a.id = r.agent_id
             WHERE r.signal_id = ?
@@ -1013,7 +995,13 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
         )
         rows = cursor.fetchall()
         conn.close()
-        return {'replies': [dict(row) for row in rows]}
+        replies = []
+        for row in rows:
+            reply = dict(row)
+            reply['agent_identity_status'] = agent_identity_status(row)
+            reply['agent_is_verified'] = agent_is_verified(row)
+            replies.append(reply)
+        return {'replies': replies}
 
     @app.get('/api/signals/feed')
     async def get_signal_feed(
@@ -1044,6 +1032,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
         now_ts = time.time()
         redis_cache_key = (
             f'{SIGNAL_FEED_CACHE_KEY_PREFIX}:'
+            f'v=identity-1:'
             f"message_type={feed_cache_key[0] or 'all'}:"
             f"market={feed_cache_key[1] or 'all'}:"
             f"keyword={feed_cache_key[2] or 'none'}:"
@@ -1143,6 +1132,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
                 SELECT
                     s.*,
                     a.name as agent_name,
+                    a.identity_status as agent_identity_status,
                     COALESCE(rs.reply_count, 0) as reply_count,
                     rs.last_reply_at as last_reply_at,
                     COALESCE(rs.participant_count, 1) as participant_count
@@ -1180,6 +1170,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
                 SELECT
                     s.*,
                     a.name as agent_name,
+                    a.identity_status as agent_identity_status,
                     COALESCE(rs.reply_count, 0) as reply_count,
                     rs.last_reply_at as last_reply_at,
                     COALESCE(rs.participant_count, 1) as participant_count
@@ -1283,6 +1274,8 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
             signal_dict['reward_variant_key'] = reward.get('variant_key')
             signal_dict['accepted_reply_count'] = 1 if signal_dict.get('accepted_reply_id') else 0
             signal_dict['is_following_author'] = signal_dict['agent_id'] in followed_author_ids
+            signal_dict['agent_identity_status'] = agent_identity_status(signal_dict)
+            signal_dict['agent_is_verified'] = agent_is_verified(signal_dict)
             signals.append(signal_dict)
 
         payload = {
@@ -1327,6 +1320,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
             SELECT
                 s.leader_id,
                 a.name as leader_name,
+                a.identity_status as leader_identity_status,
                 s.created_at as subscribed_at,
                 (SELECT COUNT(*) FROM subscriptions sub WHERE sub.leader_id = s.leader_id AND sub.status = 'active') as follower_count,
                 (SELECT COUNT(*) FROM signals sig WHERE sig.agent_id = s.leader_id AND sig.message_type = 'operation' AND sig.created_at >= datetime('now', '-7 day')) as recent_trade_count_7d,
@@ -1353,9 +1347,12 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
 
         following = []
         for row in rows:
+            leader_identity = agent_identity_status({'identity_status': row['leader_identity_status']})
             following.append({
                 'leader_id': row['leader_id'],
                 'leader_name': row['leader_name'],
+                'leader_identity_status': leader_identity,
+                'leader_is_verified': leader_identity == 'verified',
                 'subscribed_at': row['subscribed_at'],
                 'follower_count': row['follower_count'] or 0,
                 'recent_trade_count_7d': row['recent_trade_count_7d'] or 0,
@@ -1391,6 +1388,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
             SELECT
                 s.follower_id,
                 a.name as follower_name,
+                a.identity_status as follower_identity_status,
                 s.created_at as subscribed_at,
                 (SELECT COUNT(*) FROM signals sig WHERE sig.agent_id = s.follower_id AND sig.message_type = 'operation' AND sig.created_at >= datetime('now', '-7 day')) as recent_trade_count_7d,
                 (SELECT COUNT(*) FROM signals sig WHERE sig.agent_id = s.follower_id AND sig.message_type IN ('strategy', 'discussion') AND sig.created_at >= datetime('now', '-7 day')) as recent_social_count_7d,
@@ -1410,9 +1408,12 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
 
         subscribers = []
         for row in rows:
+            follower_identity = agent_identity_status({'identity_status': row['follower_identity_status']})
             subscribers.append({
                 'follower_id': row['follower_id'],
                 'follower_name': row['follower_name'],
+                'follower_identity_status': follower_identity,
+                'follower_is_verified': follower_identity == 'verified',
                 'subscribed_at': row['subscribed_at'],
                 'recent_trade_count_7d': row['recent_trade_count_7d'] or 0,
                 'recent_social_count_7d': row['recent_social_count_7d'] or 0,
@@ -1447,6 +1448,7 @@ def register_signal_routes(app: FastAPI, ctx: RouteContext) -> None:
         now_ts = time.time()
         redis_cache_key = (
             f'{AGENT_SIGNALS_CACHE_KEY_PREFIX}:'
+            f'v=identity-1:'
             f'agent_id={agent_id}:'
             f"message_type={(message_type or '').strip() or 'all'}:"
             f'limit={max(1, limit)}'

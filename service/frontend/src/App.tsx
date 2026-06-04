@@ -246,6 +246,7 @@ function AppRouter({
   const canUseExperiments = hasPermission(agentInfo, 'experiment_admin')
   const canUseResearchExports = hasPermission(agentInfo, 'research_exports')
   const canUseTeamMissionAdmin = hasPermission(agentInfo, 'team_mission_admin')
+  const canAdmin = agentInfo?.role === 'admin'
   const permissionLoading = Boolean(token && agentInfoLoading)
   const permissionLoadingView = <div className="loading"><div className="spinner"></div></div>
 
@@ -276,8 +277,8 @@ function AppRouter({
           <Routes>
             <Route path="/market" element={<SignalsFeed token={token} />} />
             <Route path="/leaderboard" element={<LeaderboardPage token={token} />} />
-            <Route path="/challenges" element={<ChallengePage token={token} />} />
-            <Route path="/challenges/:challengeKey" element={<ChallengePage token={token} />} />
+            <Route path="/challenges" element={<ChallengePage token={token} canAdmin={canAdmin} />} />
+            <Route path="/challenges/:challengeKey" element={<ChallengePage token={token} canAdmin={canAdmin} />} />
             <Route path="/team-missions" element={permissionLoading ? permissionLoadingView : canUseTeamMissionAdmin ? <TeamMissionsPage token={token} canAdmin={canUseTeamMissionAdmin} /> : <Navigate to="/market" replace />} />
             <Route path="/team-missions/:missionKey" element={permissionLoading ? permissionLoadingView : canUseTeamMissionAdmin ? <TeamMissionsPage token={token} canAdmin={canUseTeamMissionAdmin} /> : <Navigate to="/market" replace />} />
             <Route path="/teams/:teamKey" element={permissionLoading ? permissionLoadingView : canUseTeamMissionAdmin ? <TeamMissionsPage token={token} canAdmin={canUseTeamMissionAdmin} /> : <Navigate to="/market" replace />} />

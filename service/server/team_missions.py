@@ -11,7 +11,7 @@ from typing import Any, Optional
 from database import begin_write_transaction, get_db_connection
 from experiment_events import record_event
 from rewards import grant_agent_reward
-from routes_shared import utc_now_iso_z
+from routes_shared import agent_identity_status, agent_is_verified, utc_now_iso_z
 from team_matching import assign_roles, build_agent_features, form_team_groups
 from team_scoring import (
     contribution_score_for_message,
@@ -653,7 +653,7 @@ def get_team(team_key: str) -> dict[str, Any]:
         mission = _load_mission(cursor, mission_id=team["mission_id"])
         cursor.execute(
             """
-            SELECT tm.*, a.name AS agent_name
+            SELECT tm.*, a.name AS agent_name, a.identity_status AS agent_identity_status
             FROM team_members tm
             JOIN agents a ON a.id = tm.agent_id
             WHERE tm.team_id = ?
@@ -661,10 +661,15 @@ def get_team(team_key: str) -> dict[str, Any]:
             """,
             (team["id"],),
         )
-        members = [dict(row) for row in cursor.fetchall()]
+        members = []
+        for row in cursor.fetchall():
+            member = dict(row)
+            member["agent_identity_status"] = agent_identity_status(row)
+            member["agent_is_verified"] = agent_is_verified(row)
+            members.append(member)
         cursor.execute(
             """
-            SELECT tmsg.*, a.name AS agent_name
+            SELECT tmsg.*, a.name AS agent_name, a.identity_status AS agent_identity_status
             FROM team_messages tmsg
             JOIN agents a ON a.id = tmsg.agent_id
             WHERE tmsg.team_id = ?
@@ -673,7 +678,12 @@ def get_team(team_key: str) -> dict[str, Any]:
             """,
             (team["id"],),
         )
-        messages = [dict(row) for row in cursor.fetchall()]
+        messages = []
+        for row in cursor.fetchall():
+            message = dict(row)
+            message["agent_identity_status"] = agent_identity_status(row)
+            message["agent_is_verified"] = agent_is_verified(row)
+            messages.append(message)
         cursor.execute(
             """
             SELECT ts.*, a.name AS submitted_by_agent_name

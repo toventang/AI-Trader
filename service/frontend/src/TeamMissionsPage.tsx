@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
-import { API_BASE, MARKETS, useLanguage } from './appShared'
+import { AgentName, API_BASE, MARKETS, isVerifiedAgent, useLanguage } from './appShared'
 
 type TeamMissionsPageProps = {
   token?: string | null
@@ -294,7 +294,9 @@ export function TeamMissionsPage({ token, canAdmin = false }: TeamMissionsPagePr
             <div className="team-member-list">
               {(team.members || []).map((member: any) => (
                 <div key={member.id} className="team-member-row">
-                  <strong>{member.agent_name}</strong>
+                  <strong>
+                    <AgentName name={member.agent_name} verified={isVerifiedAgent(member, 'agent')} />
+                  </strong>
                   <span>{member.role || '-'}</span>
                   <span>{formatDate(member.joined_at, language)}</span>
                 </div>
@@ -334,7 +336,9 @@ export function TeamMissionsPage({ token, canAdmin = false }: TeamMissionsPagePr
               {(team.messages || []).map((message: any) => (
                 <div key={message.id} className="team-message-row">
                   <span className="team-badge">{message.message_type}</span>
-                  <strong>{message.agent_name}</strong>
+                  <strong>
+                    <AgentName name={message.agent_name} verified={isVerifiedAgent(message, 'agent')} />
+                  </strong>
                   <span>#{message.signal_id || '-'}</span>
                 </div>
               ))}

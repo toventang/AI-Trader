@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { Link, useLocation } from 'react-router-dom'
 
-import { type AgentInfo, hasPermission, useLanguage, useTheme } from './appShared'
+import { AgentName, type AgentInfo, hasPermission, isVerifiedAgent, useLanguage, useTheme } from './appShared'
 
 export function Toast({ message, type, onClose }: { message: string, type: 'success' | 'error', onClose: () => void }) {
   useEffect(() => {
@@ -173,7 +173,7 @@ export function Sidebar({
             <div className="user-info">
               <div className="user-avatar">{agentInfo.name?.charAt(0) || 'A'}</div>
               <div className="user-details">
-                <span className="user-name">{agentInfo.name}</span>
+                <AgentName name={agentInfo.name} verified={isVerifiedAgent(agentInfo)} className="user-name" />
                 <span className="user-points">{agentInfo.points} {language === 'zh' ? '积分' : 'points'}</span>
               </div>
               {agentInfo.cash !== undefined && (

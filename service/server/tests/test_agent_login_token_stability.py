@@ -82,6 +82,38 @@ class AgentLoginTokenStabilityTests(unittest.TestCase):
         self.assertEqual(cursor.fetchone()["email"], "trader@example.com")
         conn.close()
 
+    def test_agent_identity_defaults_normal_and_can_be_verified_manually(self) -> None:
+        register = self.client.post(
+            "/api/claw/agents/selfRegister",
+            json={"name": "identity-agent", "password": "password123"},
+        )
+        self.assertEqual(register.status_code, 200, register.text)
+        token = register.json()["token"]
+        self.assertEqual(register.json()["identity_status"], "normal")
+        self.assertFalse(register.json()["is_verified"])
+
+        me = self.client.get(
+            "/api/claw/agents/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(me.status_code, 200, me.text)
+        self.assertEqual(me.json()["identity_status"], "normal")
+        self.assertFalse(me.json()["is_verified"])
+
+        conn = database.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE agents SET identity_status = 'verified' WHERE name = ?", ("identity-agent",))
+        conn.commit()
+        conn.close()
+
+        verified_me = self.client.get(
+            "/api/claw/agents/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(verified_me.status_code, 200, verified_me.text)
+        self.assertEqual(verified_me.json()["identity_status"], "verified")
+        self.assertTrue(verified_me.json()["is_verified"])
+
     def test_agent_login_issues_token_only_for_legacy_empty_token(self) -> None:
         conn = database.get_db_connection()
         cursor = conn.cursor()

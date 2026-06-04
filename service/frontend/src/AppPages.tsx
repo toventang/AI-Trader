@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
 import {
+  AgentName,
   API_BASE,
   type AgentInfo,
   COPY_TRADING_PAGE_SIZE,
@@ -12,6 +13,7 @@ import {
   MARKETS,
   REFRESH_INTERVAL,
   SIGNALS_FEED_PAGE_SIZE,
+  type LeaderboardChartMetric,
   type LeaderboardChartRange,
   type MarketIntelNewsCategory,
   LeaderboardTooltip,
@@ -21,6 +23,7 @@ import {
   getCurrentETTime,
   getInstrumentLabel,
   getLeaderboardDays,
+  isVerifiedAgent,
   isUSMarketOpen,
   useLanguage,
 } from './appShared'
@@ -1194,7 +1197,9 @@ export function SignalsFeed({ token }: { token?: string | null }) {
       if (res.ok) {
         return {
           agent_id: data.agent_id || agentId,
-          agent_name: data.agent_name || `Agent ${agentId}`
+          agent_name: data.agent_name || `Agent ${agentId}`,
+          agent_identity_status: data.agent_identity_status,
+          agent_is_verified: data.agent_is_verified
         }
       }
     } catch (e) {
@@ -1350,7 +1355,7 @@ export function SignalsFeed({ token }: { token?: string | null }) {
         // Second level: Show signals from selected agent
         <div>
           <button className="back-button" onClick={handleBack}>
-            ← {language === 'zh' ? '返回' : 'Back'} | {selectedAgent.agent_name}
+            ← {language === 'zh' ? '返回' : 'Back'} | <AgentName name={selectedAgent.agent_name} verified={isVerifiedAgent(selectedAgent, 'agent')} />
           </button>
 
           {/* Signal type tabs */}
@@ -1534,7 +1539,7 @@ export function SignalsFeed({ token }: { token?: string | null }) {
                 onClick={() => handleAgentClick(agent)}
               >
                 <div className="agent-header">
-                  <span className="agent-name">{agent.agent_name}</span>
+                  <AgentName name={agent.agent_name} verified={isVerifiedAgent(agent, 'agent')} className="agent-name" />
                 </div>
                 <div className="agent-stats">
                   <div className="agent-stat">
@@ -1786,7 +1791,9 @@ export function CopyTradingPage({ token }: { token: string }) {
                         #{rank}
                       </div>
                       <div>
-                        <div style={{ fontWeight: 600 }}>{provider.name || `Agent ${provider.agent_id}`}</div>
+                        <div style={{ fontWeight: 600 }}>
+                          <AgentName name={provider.name || `Agent ${provider.agent_id}`} verified={isVerifiedAgent(provider)} />
+                        </div>
                         <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                           {language === 'zh' ? '最近活跃' : 'Recent activity'}: {provider.recent_activity_at ? new Date(provider.recent_activity_at).toLocaleString() : '-'}
                         </div>
@@ -1905,7 +1912,9 @@ export function CopyTradingPage({ token }: { token: string }) {
                         {(f.leader_name || 'A').charAt(0).toUpperCase()}
                       </div>
                       <div>
-                        <div style={{ fontWeight: 500 }}>{f.leader_name || `Agent ${f.leader_id}`}</div>
+                        <div style={{ fontWeight: 500 }}>
+                          <AgentName name={f.leader_name || `Agent ${f.leader_id}`} verified={isVerifiedAgent(f, 'leader')} />
+                        </div>
                         <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                           {language === 'zh' ? '自 ' : 'Since '}
                           {new Date(f.subscribed_at).toLocaleDateString(language === 'zh' ? 'zh-CN' : 'en-US')}
@@ -1991,7 +2000,8 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
   const [leaderboardPage, setLeaderboardPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [chartRange, setChartRange] = useState<LeaderboardChartRange>('24h')
-  const [metric, setMetric] = useState<'return' | 'risk' | 'collaboration' | 'quality'>('return')
+  const [chartMetric, setChartMetric] = useState<LeaderboardChartMetric>('return')
+  const [metric, setMetric] = useState<'return' | 'drawdown' | 'risk' | 'collaboration' | 'quality'>('return')
   const [activeChallengeCount, setActiveChallengeCount] = useState(0)
   const { language } = useLanguage()
   const navigate = useNavigate()
@@ -2038,8 +2048,8 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
   }
 
   const chartData = useMemo(
-    () => buildLeaderboardChartData(profitHistory, chartRange, language),
-    [profitHistory, chartRange, language]
+    () => buildLeaderboardChartData(profitHistory, chartRange, language, chartMetric),
+    [profitHistory, chartRange, language, chartMetric]
   )
   const topChartAgents = useMemo(() => profitHistory.slice(0, 10), [profitHistory])
   const leaderboardTotalPages = Math.max(1, Math.ceil(totalTraders / LEADERBOARD_PAGE_SIZE))
@@ -2047,12 +2057,18 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
   const formatReturnPercent = (value: any) => `${Number(value || 0).toFixed(2)}%`
   const metricOptions = [
     ['return', language === 'zh' ? '收益' : 'Return'],
+    ['drawdown', language === 'zh' ? '最大回撤' : 'Max Drawdown'],
     ['risk', language === 'zh' ? '风险调整' : 'Risk Adjusted'],
     ['collaboration', language === 'zh' ? '协作' : 'Collaboration'],
     ['quality', language === 'zh' ? '质量评分' : 'Quality']
   ] as const
+  const chartMetricOptions = [
+    ['return', language === 'zh' ? '收益' : 'Return'],
+    ['drawdown', language === 'zh' ? '最大回撤' : 'Max Drawdown']
+  ] as const
 
   const metricValue = (agent: any) => {
+    if (metric === 'drawdown') return formatReturnPercent(agent.max_drawdown ?? agent.metric_snapshot?.max_drawdown ?? 0)
     if (metric === 'risk') return Number(agent.risk_adjusted_score || 0).toFixed(2)
     if (metric === 'collaboration') return Number(agent.collaboration_score || 0).toFixed(0)
     if (metric === 'quality') return Number(agent.quality_score_avg || 0).toFixed(2)
@@ -2109,6 +2125,7 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
             className={metric === value ? 'active' : ''}
             onClick={() => {
               setMetric(value)
+              setChartMetric(value === 'drawdown' ? 'drawdown' : 'return')
               setLeaderboardPage(1)
             }}
           >
@@ -2122,9 +2139,28 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
         <div className="card" style={{ marginBottom: '20px', padding: '16px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '12px' }}>
             <h3 style={{ fontSize: '16px', margin: 0 }}>
-              {language === 'zh' ? '收益率曲线' : 'Return Chart'}
+              {chartMetric === 'drawdown'
+                ? (language === 'zh' ? '最大回撤曲线' : 'Max Drawdown Chart')
+                : (language === 'zh' ? '收益率曲线' : 'Return Chart')}
             </h3>
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+              {chartMetricOptions.map(([value, label]) => (
+                <button
+                  key={value}
+                  onClick={() => setChartMetric(value)}
+                  style={{
+                    padding: '4px 12px',
+                    borderRadius: '4px',
+                    border: 'none',
+                    background: chartMetric === value ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
+                    color: chartMetric === value ? '#fff' : 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    fontSize: '12px'
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
               <button
                 onClick={() => {
                   setChartRange('all')
@@ -2170,9 +2206,14 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
                 >
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--bg-tertiary)" />
                   <XAxis dataKey="time" stroke="var(--text-secondary)" tick={{ fontSize: 10 }} minTickGap={24} />
-                  <YAxis stroke="var(--text-secondary)" tick={{ fontSize: 12 }} tickFormatter={(value: any) => `${Number(value).toFixed(0)}%`} />
+                  <YAxis
+                    stroke="var(--text-secondary)"
+                    tick={{ fontSize: 12 }}
+                    domain={chartMetric === 'drawdown' ? [0, 'auto'] : undefined}
+                    tickFormatter={(value: any) => `${Number(value).toFixed(0)}%`}
+                  />
                   <Tooltip
-                    content={<LeaderboardTooltip />}
+                    content={<LeaderboardTooltip sortDescending={chartMetric !== 'drawdown'} />}
                   />
                   {topChartAgents.map((agent: any, idx: number) => (
                     <Line
@@ -2232,9 +2273,11 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
                     borderRadius: '999px',
                     background: LEADERBOARD_LINE_COLORS[idx % LEADERBOARD_LINE_COLORS.length]
                   }}></span>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '12px', fontWeight: 600 }}>
-                    {agent.name}
-                  </span>
+                  <AgentName
+                    name={agent.name}
+                    verified={isVerifiedAgent(agent)}
+                    className="leaderboard-chart-agent-name"
+                  />
                 </button>
                 )
               })}
@@ -2258,6 +2301,7 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
             {profitHistory.map((agent: any, idx: number) => {
               const rank = leaderboardOffset + idx + 1
               const podiumIndex = rank - 1
+              const currentDrawdown = agent.max_drawdown ?? agent.metric_snapshot?.max_drawdown ?? 0
               return (
               <div
                 key={agent.agent_id}
@@ -2287,13 +2331,15 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
                     {rank}
                   </div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: '16px' }}>{agent.name}</div>
+                    <div style={{ fontWeight: 600, fontSize: '16px' }}>
+                      <AgentName name={agent.name} verified={isVerifiedAgent(agent)} />
+                    </div>
                     <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                       {language === 'zh' ? '最后更新' : 'Last updated'}: {agent.history ? agent.history[agent.history.length - 1]?.recorded_at?.split('T')[0] : '-'}
                     </div>
                   </div>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '12px', fontSize: '14px' }}>
                   <div>
                     <span style={{ color: 'var(--text-secondary)' }}>
                       {language === 'zh' ? '收益率' : 'Return'}: </span>
@@ -2307,6 +2353,11 @@ export function LeaderboardPage({ token }: { token?: string | null }) {
                     <span style={{ color: 'var(--text-muted)', marginLeft: '8px', fontSize: '12px' }}>
                       (${agent.total_profit?.toFixed(2) || '0.00'})
                     </span>
+                  </div>
+                  <div>
+                    <span style={{ color: 'var(--text-secondary)' }}>
+                      {language === 'zh' ? '最大回撤' : 'Max DD'}: </span>
+                    <span style={{ fontWeight: 700 }}>{formatReturnPercent(currentDrawdown)}</span>
                   </div>
                   <div>
                     <span style={{ color: 'var(--text-secondary)' }}>

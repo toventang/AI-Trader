@@ -78,6 +78,46 @@ body {
   min-height: 100vh;
 }
 
+.agent-name-with-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.agent-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-verified-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #2f8cff;
+  color: #fff;
+  border: 1px solid rgba(172, 210, 255, 0.7);
+  box-shadow: 0 0 0 2px rgba(47, 140, 255, 0.12);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.leaderboard-chart-agent-name {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* Background Pattern */
 body::before {
   content: '';
@@ -690,6 +730,13 @@ a {
   background: rgba(14, 20, 26, 0.72);
 }
 
+.challenge-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .challenge-tabs button {
   padding: 8px 14px;
   border: 0;
@@ -776,11 +823,12 @@ a {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow-x: auto;
 }
 
 .challenge-rank-row {
   display: grid;
-  grid-template-columns: 56px minmax(140px, 1fr) repeat(4, minmax(84px, auto));
+  grid-template-columns: 56px minmax(140px, 1fr) repeat(4, minmax(86px, 116px));
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
@@ -788,6 +836,22 @@ a {
   border-radius: 14px;
   background: rgba(18, 27, 34, 0.62);
   font-size: 13px;
+}
+
+.challenge-rank-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.challenge-rank-header {
+  padding-top: 0;
+  padding-bottom: 2px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .challenge-rank-row.disqualified {
@@ -834,6 +898,111 @@ a {
   font-size: 12px;
 }
 
+.challenge-trading-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+  gap: 20px;
+}
+
+.challenge-trading-grid-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.challenge-trade-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.challenge-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.challenge-field span,
+.challenge-position-list h3,
+.challenge-portfolio-grid span,
+.challenge-position-row span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.challenge-field span {
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.challenge-trade-note {
+  grid-column: 1 / -1;
+  min-height: 92px;
+}
+
+.challenge-trade-form .btn {
+  width: fit-content;
+  justify-content: center;
+}
+
+.challenge-portfolio-panel {
+  min-width: 0;
+}
+
+.challenge-portfolio-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(96px, 1fr));
+  gap: 10px;
+}
+
+.challenge-portfolio-grid div {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: rgba(18, 27, 34, 0.54);
+}
+
+.challenge-portfolio-grid strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-primary);
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+
+.challenge-position-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.challenge-position-list h3 {
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.challenge-position-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(70px, 110px) minmax(70px, 110px);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: rgba(18, 27, 34, 0.48);
+  font-size: 13px;
+}
+
+.challenge-position-row strong {
+  color: var(--text-primary);
+  text-align: right;
+}
+
+.challenge-empty-compact {
+  min-height: auto;
+  padding: 12px;
+}
+
 .challenge-submit-form {
   display: grid;
   gap: 12px;
@@ -872,6 +1041,11 @@ a {
 :root[data-theme='light'] .challenge-metrics-strip div {
   background: linear-gradient(180deg, rgba(248, 243, 234, 0.96), rgba(243, 237, 227, 0.94));
   border-color: rgba(108, 87, 58, 0.12);
+}
+
+:root[data-theme='light'] .challenge-portfolio-grid div,
+:root[data-theme='light'] .challenge-position-row {
+  background: rgba(232, 223, 207, 0.56);
 }
 
 .tags {
@@ -3053,6 +3227,9 @@ a {
   .challenge-metrics-strip,
   .challenge-detail-grid,
   .challenge-create-grid,
+  .challenge-trading-grid,
+  .challenge-trade-form,
+  .challenge-portfolio-grid,
   .team-metrics,
   .team-grid,
   .team-create-grid,
@@ -3066,6 +3243,7 @@ a {
   }
 
   .challenge-rank-row,
+  .challenge-position-row,
   .team-rank-row,
   .team-member-row,
   .team-message-row,
@@ -3075,8 +3253,32 @@ a {
     grid-template-columns: 44px minmax(0, 1fr);
   }
 
+  .challenge-position-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .challenge-position-row strong {
+    text-align: left;
+  }
+
+  .challenge-rank-header {
+    display: none;
+  }
+
   .challenge-rank-row span:nth-child(n + 3) {
     grid-column: 2;
+  }
+
+  .challenge-rank-row:not(.challenge-rank-header) span[data-label] {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .challenge-rank-row:not(.challenge-rank-header) span[data-label]::before {
+    content: attr(data-label);
+    color: var(--text-secondary);
+    font-weight: 600;
   }
 
   .team-rank-row span:nth-child(n + 3),

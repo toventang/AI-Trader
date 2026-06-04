@@ -61,6 +61,7 @@ POSITIONS_CACHE_TTL_SECONDS = 10
 MENTION_PATTERN = re.compile(r'@([A-Za-z0-9_\-]{2,64})')
 _EXPERIMENT_NOTICE_EXPOSURE_EVENT_CACHE: dict[tuple[int, str, str], float] = {}
 SUPPORTED_MARKETS = {'us-stock', 'crypto', 'polymarket'}
+VERIFIED_AGENT_IDENTITY_STATUS = 'verified'
 MARKET_ALIASES = {
     'binance': 'crypto',
     'binance-spot': 'crypto',
@@ -94,6 +95,28 @@ MARKET_ALIASES = {
 def normalize_market(market: str | None) -> str:
     normalized = (market or 'us-stock').strip().lower()
     return MARKET_ALIASES.get(normalized, normalized)
+
+
+def agent_identity_status(agent: Any | None) -> str:
+    if not agent:
+        return 'normal'
+    raw_status = None
+    for key in ('identity_status', 'agent_identity_status', 'leader_identity_status', 'follower_identity_status'):
+        try:
+            raw_status = agent.get(key)
+        except AttributeError:
+            try:
+                raw_status = agent[key]
+            except Exception:
+                raw_status = None
+        if raw_status:
+            break
+    status = str(raw_status or 'normal').strip().lower()
+    return VERIFIED_AGENT_IDENTITY_STATUS if status == VERIFIED_AGENT_IDENTITY_STATUS else 'normal'
+
+
+def agent_is_verified(agent: Any | None) -> bool:
+    return agent_identity_status(agent) == VERIFIED_AGENT_IDENTITY_STATUS
 
 
 def validate_market(market: str | None) -> str:

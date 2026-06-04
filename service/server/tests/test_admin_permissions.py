@@ -28,6 +28,7 @@ class AdminPermissionTests(unittest.TestCase):
         database._SQLITE_DB_PATH = os.path.join(self.tmp.name, "test.db")
         database.init_database()
         self.admin_id = self._create_agent("admin-agent", "admin")
+        self.experiment_admin_id = self._create_agent("experiment-admin-agent", "experiment_admin")
         self.regular_id = self._create_agent("regular-agent", "agent")
         self.client = TestClient(create_app())
 
@@ -127,3 +128,51 @@ class AdminPermissionTests(unittest.TestCase):
             json={},
         )
         self.assertEqual(auto_form.status_code, 403, auto_form.text)
+
+    def test_only_admin_can_create_challenges(self):
+        payload = {
+            "challenge_key": "admin-only-challenge",
+            "title": "Admin only challenge",
+            "market": "crypto",
+            "symbol": "BTC",
+            "start_at": iso(datetime.now(timezone.utc) - timedelta(minutes=5)),
+            "end_at": iso(datetime.now(timezone.utc) + timedelta(hours=1)),
+        }
+
+        regular = self.client.post(
+            "/api/challenges",
+            headers={"Authorization": "Bearer token-regular-agent"},
+            json=payload,
+        )
+        self.assertEqual(regular.status_code, 403, regular.text)
+
+        experiment_admin = self.client.post(
+            "/api/challenges",
+            headers={"Authorization": "Bearer token-experiment-admin-agent"},
+            json=payload,
+        )
+        self.assertEqual(experiment_admin.status_code, 403, experiment_admin.text)
+
+        admin = self.client.post(
+            "/api/challenges",
+            headers={"Authorization": "Bearer token-admin-agent"},
+            json=payload,
+        )
+        self.assertEqual(admin.status_code, 200, admin.text)
+
+        join = self.client.post(
+            "/api/challenges/admin-only-challenge/join",
+            headers={"Authorization": "Bearer token-regular-agent"},
+            json={},
+        )
+        self.assertEqual(join.status_code, 200, join.text)
+        self.assertTrue(join.json()["joined"])
+
+        second_join = self.client.post(
+            "/api/challenges/admin-only-challenge/join",
+            headers={"Authorization": "Bearer token-regular-agent"},
+            json={},
+        )
+        self.assertEqual(second_join.status_code, 200, second_join.text)
+        self.assertFalse(second_join.json()["joined"])
+        self.assertTrue(second_join.json()["idempotent"])

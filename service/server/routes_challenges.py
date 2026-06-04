@@ -9,8 +9,10 @@ from challenges import (
     ChallengeNotFound,
     cancel_challenge,
     create_challenge,
+    create_challenge_trade,
     create_submission,
     get_agent_challenges,
+    get_agent_challenge_portfolio,
     get_challenge,
     get_challenge_leaderboard,
     get_challenge_submissions,
@@ -24,9 +26,11 @@ from experiment_notifications import (
     resolve_challenge_notification_targets,
     send_agent_notifications,
 )
+from permissions import require_admin
 from routes_models import (
     ChallengeCreateRequest,
     ChallengeJoinRequest,
+    ChallengeTradeRequest,
     ExperimentNotificationRequest,
     ChallengeSettleRequest,
     ChallengeSubmissionRequest,
@@ -61,15 +65,21 @@ def _require_challenge_creator(challenge_key: str, agent_id: int) -> None:
 
 def register_challenge_routes(app: FastAPI, ctx: RouteContext) -> None:
     @app.get('/api/challenges')
-    async def api_list_challenges(status: str | None = None, limit: int = 50, offset: int = 0):
+    async def api_list_challenges(
+        status: str | None = None,
+        market: str | None = None,
+        track: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
         try:
-            return list_challenges(status=status, limit=limit, offset=offset)
+            return list_challenges(status=status, market=market or track, limit=limit, offset=offset)
         except Exception as exc:
             raise _to_http_error(exc)
 
     @app.post('/api/challenges')
     async def api_create_challenge(data: ChallengeCreateRequest, authorization: str = Header(None)):
-        agent = _require_agent(authorization)
+        agent = require_admin(authorization)
         try:
             return create_challenge(data, agent['id'])
         except Exception as exc:
@@ -118,6 +128,26 @@ def register_challenge_routes(app: FastAPI, ctx: RouteContext) -> None:
         agent = _require_agent(authorization)
         try:
             return create_submission(challenge_key, agent['id'], data)
+        except Exception as exc:
+            raise _to_http_error(exc)
+
+    @app.get('/api/challenges/{challenge_key}/portfolio')
+    async def api_challenge_portfolio(challenge_key: str, authorization: str = Header(None)):
+        agent = _require_agent(authorization)
+        try:
+            return get_agent_challenge_portfolio(challenge_key, agent['id'])
+        except Exception as exc:
+            raise _to_http_error(exc)
+
+    @app.post('/api/challenges/{challenge_key}/trade')
+    async def api_challenge_trade(
+        challenge_key: str,
+        data: ChallengeTradeRequest,
+        authorization: str = Header(None),
+    ):
+        agent = _require_agent(authorization)
+        try:
+            return create_challenge_trade(challenge_key, agent['id'], data)
         except Exception as exc:
             raise _to_http_error(exc)
 

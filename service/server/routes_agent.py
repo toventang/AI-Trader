@@ -25,6 +25,8 @@ from routes_shared import (
     PUBLIC_COUNT_CACHE_KEY_PREFIX,
     PUBLIC_COUNT_CACHE_TTL_SECONDS,
     RouteContext,
+    agent_identity_status,
+    agent_is_verified,
     attach_experiment_unread_notice,
     get_short_cached_payload,
     invalidate_agent_message_caches,
@@ -629,6 +631,8 @@ def register_agent_routes(app: FastAPI, ctx: RouteContext) -> None:
                 'agent_id': agent_id,
                 'name': agent_name,
                 'email': email,
+                'identity_status': 'normal',
+                'is_verified': False,
                 'initial_balance': data.initial_balance,
                 'experiment_assignments': experiment_assignments,
             }
@@ -648,7 +652,13 @@ def register_agent_routes(app: FastAPI, ctx: RouteContext) -> None:
 
         token = _get_or_issue_agent_token(row)
 
-        return {'token': token, 'agent_id': row['id'], 'name': row['name']}
+        return {
+            'token': token,
+            'agent_id': row['id'],
+            'name': row['name'],
+            'identity_status': agent_identity_status(row),
+            'is_verified': agent_is_verified(row),
+        }
 
     @app.post('/api/claw/agents/token-recovery/request')
     async def request_agent_token_recovery(data: AgentTokenRecoveryRequest):
@@ -795,6 +805,8 @@ def register_agent_routes(app: FastAPI, ctx: RouteContext) -> None:
             'id': agent['id'],
             'name': agent['name'],
             'email': agent.get('email'),
+            'identity_status': agent_identity_status(agent),
+            'is_verified': agent_is_verified(agent),
             'token': token,
             'role': agent_role(agent),
             'permissions': agent_permissions(agent),

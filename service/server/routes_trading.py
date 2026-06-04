@@ -17,6 +17,8 @@ from routes_shared import (
     PRICE_QUOTE_CACHE_TTL_SECONDS,
     RouteContext,
     TRENDING_CACHE_KEY,
+    agent_identity_status,
+    agent_is_verified,
     allow_sync_price_fetch_in_api,
     attach_experiment_unread_notice,
     check_price_api_rate_limit,
@@ -42,6 +44,16 @@ def profit_percent_for_display(profit: float, deposited: float) -> float:
     return clamp_profit_for_display(profit) / base_capital * 100
 
 
+def equity_for_display(profit: float, deposited: float) -> float:
+    return INITIAL_CAPITAL + (deposited or 0) + clamp_profit_for_display(profit)
+
+
+def max_drawdown_percent_for_display(equity: float, peak_equity: float) -> float:
+    if peak_equity <= 0:
+        return 0.0
+    return max(0.0, (peak_equity - equity) / peak_equity * 100)
+
+
 def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
     def _agent_from_authorization(authorization: str | None) -> Optional[dict]:
         token = _extract_token(authorization)
@@ -64,13 +76,14 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
         limit = max(1, min(limit, 50))
         offset = max(0, offset)
         metric = (metric or 'return').strip().lower()
-        if metric not in {'return', 'risk', 'collaboration', 'quality'}:
+        if metric not in {'return', 'drawdown', 'risk', 'collaboration', 'quality'}:
             metric = 'return'
 
         cache_key = (limit, days, offset, include_history, metric)
         now_ts = time.time()
         redis_cache_key = (
             f'{LEADERBOARD_CACHE_KEY_PREFIX}:'
+            f'v=identity-1:'
             f'metric={metric}:'
             f'limit={limit}:days={days}:offset={offset}:history={int(include_history)}'
         )
@@ -108,6 +121,7 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
 
         order_by = {
             'return': 'profit_percent DESC',
+            'drawdown': 'max_drawdown ASC',
             'risk': 'risk_adjusted_score DESC',
             'collaboration': 'collaboration_score DESC',
             'quality': 'quality_score_avg DESC',
@@ -129,6 +143,7 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
                 SELECT
                     a.id AS agent_id,
                     a.name,
+                    a.identity_status,
                     ale.reason AS leaderboard_exclusion_reason,
                     COALESCE(a.deposited, 0) AS deposited,
                     (
@@ -177,7 +192,7 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
                  AND COALESCE(ale.active, 1) = 1
                 LEFT JOIN positions p ON p.agent_id = a.id
                 WHERE ale.agent_id IS NULL
-                GROUP BY a.id, a.name, a.cash, a.deposited, ale.reason
+                GROUP BY a.id, a.name, a.identity_status, a.cash, a.deposited, ale.reason
             )
             SELECT
                 ap.*,
@@ -209,6 +224,7 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
             {
                 'agent_id': row['agent_id'],
                 'name': row['name'],
+                'identity_status': row['identity_status'],
                 'leaderboard_exclusion_reason': row['leaderboard_exclusion_reason'],
                 'deposited': row['deposited'],
                 'profit': clamp_profit_for_display(row['profit']),
@@ -269,26 +285,48 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
                     (agent['agent_id'], cutoff),
                 )
                 history = cursor.fetchall()
-                history_points = [
-                    {
-                        'profit': clamp_profit_for_display(h['profit']),
-                        'profit_percent': profit_percent_for_display(h['profit'], agent['deposited']),
+                peak_equity = INITIAL_CAPITAL + (agent['deposited'] or 0)
+                max_drawdown = 0.0
+                for h in history:
+                    profit = clamp_profit_for_display(h['profit'])
+                    equity = equity_for_display(profit, agent['deposited'])
+                    peak_equity = max(peak_equity, equity)
+                    max_drawdown = max(max_drawdown, max_drawdown_percent_for_display(equity, peak_equity))
+                    history_points.append({
+                        'profit': profit,
+                        'profit_percent': profit_percent_for_display(profit, agent['deposited']),
+                        'max_drawdown': max_drawdown,
                         'recorded_at': h['recorded_at'],
-                    }
-                    for h in history
-                ]
+                    })
 
             if include_history and (not history_points or history_points[-1]['recorded_at'] != live_snapshot_recorded_at):
+                existing_peak_equity = INITIAL_CAPITAL + (agent['deposited'] or 0)
+                existing_max_drawdown = 0.0
+                for point in history_points:
+                    existing_peak_equity = max(existing_peak_equity, equity_for_display(point['profit'], agent['deposited']))
+                    existing_max_drawdown = max(existing_max_drawdown, float(point.get('max_drawdown') or 0))
+                live_equity = equity_for_display(agent['profit'], agent['deposited'])
+                live_peak_equity = max(existing_peak_equity, live_equity)
+                live_max_drawdown = max(
+                    existing_max_drawdown,
+                    max_drawdown_percent_for_display(live_equity, live_peak_equity),
+                )
                 history_points.append({
                     'profit': clamp_profit_for_display(agent['profit']),
                     'profit_percent': profit_percent_for_display(agent['profit'], agent['deposited']),
+                    'max_drawdown': live_max_drawdown,
                     'recorded_at': live_snapshot_recorded_at,
                 })
 
             current_profit_percent = profit_percent_for_display(agent['profit'], agent['deposited'])
+            current_max_drawdown = float(agent['metric_snapshot'].get('max_drawdown', 0) or 0) if agent['metric_snapshot'] else 0
+            if history_points:
+                current_max_drawdown = float(history_points[-1].get('max_drawdown') or 0)
             result.append({
                 'agent_id': agent['agent_id'],
                 'name': agent['name'],
+                'identity_status': agent_identity_status(agent),
+                'is_verified': agent_is_verified(agent),
                 'deposited': agent['deposited'],
                 'total_profit': clamp_profit_for_display(agent['profit']),
                 'current_profit': clamp_profit_for_display(agent['profit']),
@@ -303,6 +341,7 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
                 'latest_discussion_signal_id': None,
                 'latest_discussion_title': None,
                 'risk_adjusted_score': agent['risk_adjusted_score'],
+                'max_drawdown': current_max_drawdown,
                 'collaboration_score': agent['collaboration_score'],
                 'quality_score_avg': agent['quality_score_avg'],
                 'metric_snapshot': agent['metric_snapshot'],
@@ -379,7 +418,7 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT id, name
+            SELECT id, name, identity_status
             FROM agents
             WHERE NOT EXISTS (
                 SELECT 1
@@ -425,6 +464,8 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
             result.append({
                 'agent_id': agent_id,
                 'name': agent['name'],
+                'identity_status': agent_identity_status(agent),
+                'is_verified': agent_is_verified(agent),
                 'position_pnl': total_position_pnl,
                 'trade_count': trade_count,
                 'position_count': len(positions),
@@ -642,10 +683,11 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
     async def get_agent_positions(agent_id: int):
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT name, cash FROM agents WHERE id = ?', (agent_id,))
+        cursor.execute('SELECT name, cash, identity_status FROM agents WHERE id = ?', (agent_id,))
         agent_row = cursor.fetchone()
         agent_name = agent_row['name'] if agent_row else 'Unknown'
         agent_cash = agent_row['cash'] if agent_row else 0
+        agent_identity = agent_identity_status(agent_row)
 
         cursor.execute(
             """
@@ -694,6 +736,8 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
             'total_pnl': total_pnl,
             'position_count': len(positions),
             'agent_name': agent_name,
+            'agent_identity_status': agent_identity,
+            'agent_is_verified': agent_identity == 'verified',
             'cash': agent_cash,
         }
 
@@ -706,6 +750,7 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
             SELECT
                 a.id,
                 a.name,
+                a.identity_status,
                 a.cash,
                 (SELECT MAX(created_at) FROM signals WHERE agent_id = a.id) AS recent_activity_at,
                 (SELECT COUNT(*) FROM positions WHERE agent_id = a.id) AS position_count
@@ -723,6 +768,8 @@ def register_trading_routes(app: FastAPI, ctx: RouteContext) -> None:
         return {
             'agent_id': row['id'],
             'agent_name': row['name'],
+            'agent_identity_status': agent_identity_status(row),
+            'agent_is_verified': agent_is_verified(row),
             'cash': row['cash'],
             'position_count': row['position_count'] or 0,
             'recent_activity_at': row['recent_activity_at'],

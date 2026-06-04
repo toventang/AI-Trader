@@ -100,6 +100,13 @@ def require_capability(authorization: str | None, capability: str) -> dict:
     return agent
 
 
+def require_admin(authorization: str | None) -> dict:
+    agent = require_agent(authorization)
+    if agent_role(agent) != "admin":
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    return agent
+
+
 def require_any_capability(authorization: str | None, capabilities: Iterable[str]) -> dict:
     agent = require_agent(authorization)
     agent_capabilities = agent_capability_set(agent)
