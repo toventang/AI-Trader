@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -16,6 +17,7 @@ from challenges import (
     ChallengeError,
     create_challenge_trade,
     get_agent_challenge_portfolio,
+    get_challenge_leaderboard,
     create_challenge,
     join_challenge,
     list_challenges,
@@ -168,6 +170,78 @@ class ChallengeTests(unittest.TestCase):
 
         portfolio = get_agent_challenge_portfolio(challenge["challenge_key"], self.agent_2)
         self.assertEqual(portfolio["portfolio"]["trade_count"], 1)
+
+    def test_active_leaderboard_marks_open_positions_to_market(self):
+        challenge = self._create_active_challenge(challenge_key="live-mark-leaderboard")
+        join_challenge(challenge["challenge_key"], self.agent_2)
+        join_challenge(challenge["challenge_key"], self.agent_3)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "buy", 100.0, 10.0)
+
+        with patch("price_fetcher.get_price_from_market", return_value=90.0) as mock_price:
+            result = get_challenge_leaderboard(challenge["challenge_key"])
+
+        self.assertTrue(result["provisional"])
+        mock_price.assert_called_once()
+        marked_row = next(row for row in result["leaderboard"] if row["agent_id"] == self.agent_2)
+        self.assertAlmostEqual(marked_row["return_pct"], -10.0)
+        self.assertAlmostEqual(marked_row["max_drawdown"], 10.0)
+        self.assertEqual(marked_row["trade_count"], 1)
+        self.assertTrue(marked_row["metrics"]["marked_to_market"])
+        self.assertEqual(marked_row["metrics"]["live_marks"][0]["price"], 90.0)
+
+    def test_active_leaderboard_ignores_stale_results_and_marks_to_market(self):
+        challenge = self._create_active_challenge(challenge_key="live-mark-stale-results")
+        join_challenge(challenge["challenge_key"], self.agent_2)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "buy", 100.0, 10.0)
+
+        conn = database.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO challenge_results
+            (challenge_id, agent_id, return_pct, max_drawdown, risk_adjusted_score,
+             quality_score, final_score, rank, metrics_json, settled_at)
+            VALUES (?, ?, 0, 0, 0, 0, 0, 1, '{}', ?)
+            """,
+            (challenge["id"], self.agent_2, utc_now_iso_z()),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("price_fetcher.get_price_from_market", return_value=120.0):
+            result = get_challenge_leaderboard(challenge["challenge_key"])
+
+        self.assertTrue(result["provisional"])
+        row = next(item for item in result["leaderboard"] if item["agent_id"] == self.agent_2)
+        self.assertAlmostEqual(row["return_pct"], 20.0)
+        self.assertAlmostEqual(row["max_drawdown"], 0.0)
+
+    def test_active_portfolio_marks_open_positions_to_market(self):
+        challenge = self._create_active_challenge(challenge_key="live-mark-portfolio")
+        join_challenge(challenge["challenge_key"], self.agent_2)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "buy", 100.0, 10.0)
+
+        with patch("price_fetcher.get_price_from_market", return_value=120.0):
+            portfolio = get_agent_challenge_portfolio(challenge["challenge_key"], self.agent_2)
+
+        self.assertAlmostEqual(portfolio["portfolio"]["ending_value"], 1200.0)
+        self.assertAlmostEqual(portfolio["portfolio"]["return_pct"], 20.0)
+        self.assertAlmostEqual(portfolio["portfolio"]["max_drawdown"], 0.0)
+        self.assertTrue(portfolio["portfolio"]["marked_to_market"])
+        self.assertEqual(portfolio["portfolio"]["live_marks"][0]["price"], 120.0)
+
+    def test_settlement_does_not_use_live_marks_for_open_positions(self):
+        challenge = self._create_active_challenge(challenge_key="settle-open-snapshot")
+        join_challenge(challenge["challenge_key"], self.agent_2)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "buy", 100.0, 10.0)
+
+        with patch("price_fetcher.get_price_from_market", return_value=120.0) as mock_price:
+            result = settle_challenge(challenge["challenge_key"])
+
+        mock_price.assert_not_called()
+        row = next(item for item in result["leaderboard"] if item["agent_id"] == self.agent_2)
+        self.assertAlmostEqual(row["return_pct"], 0.0)
+        self.assertAlmostEqual(row["max_drawdown"], 0.0)
 
     def test_due_challenge_settles_return_ranks_rewards_and_exports(self):
         challenge = self._create_active_challenge(challenge_key="settle-return")

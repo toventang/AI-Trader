@@ -700,10 +700,14 @@ def get_price_from_market(
             # We use the current orderbook mid price (paper trading).
             price = _get_polymarket_mid_price(symbol, token_id=token_id, outcome=outcome)
         elif market == "us-stock":
-            if not ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_API_KEY == "demo":
-                _price_log("Warning: ALPHA_VANTAGE_API_KEY not set, using agent-provided price")
-                return None
-            price = _get_us_stock_price(symbol, executed_at)
+            price = None
+            if ALPHA_VANTAGE_API_KEY and ALPHA_VANTAGE_API_KEY != "demo":
+                price = _get_us_stock_price(symbol, executed_at)
+            else:
+                _price_log("Warning: ALPHA_VANTAGE_API_KEY not set, trying yfinance fallback")
+            if price is None:
+                _price_log(f"[Price API] Alpha Vantage unavailable for {symbol}; trying yfinance fallback")
+                price = _get_yfinance_us_stock_price(symbol, executed_at)
         else:
             _price_log(f"[Price API] Unsupported market for server price fetch: {market}")
             return None
@@ -716,6 +720,124 @@ def get_price_from_market(
         return price
     except Exception as e:
         _price_log(f"[Price API] Error fetching {symbol} ({market}): {e}")
+        return None
+
+
+def _normalize_yfinance_us_symbol(symbol: str) -> str:
+    normalized = (symbol or "").strip().upper()
+    if normalized.endswith(".US"):
+        return normalized[:-3]
+    return normalized
+
+
+def _download_yfinance_history(symbol: str, start_date: str, end_date: str, interval: str):
+    import yfinance as yf
+
+    return yf.download(
+        symbol,
+        start=start_date,
+        end=end_date,
+        interval=interval,
+        auto_adjust=False,
+        progress=False,
+        prepost=True,
+        threads=False,
+        timeout=PRICE_FETCH_TIMEOUT_SECONDS,
+    )
+
+
+def _extract_yfinance_close_price(frame: Any, symbol: str, target_utc: datetime) -> Optional[float]:
+    if frame is None or getattr(frame, "empty", True):
+        return None
+
+    try:
+        import pandas as pd
+    except Exception as exc:
+        _price_log(f"[Price API] yfinance fallback missing pandas: {exc}")
+        return None
+
+    selected = frame.copy()
+    try:
+        if isinstance(selected.columns, pd.MultiIndex):
+            target_symbol = symbol.upper()
+            for level in range(selected.columns.nlevels):
+                values = [str(value).upper() for value in selected.columns.get_level_values(level)]
+                if target_symbol in values:
+                    selected = selected.xs(symbol, axis=1, level=level, drop_level=True)
+                    break
+            if isinstance(selected.columns, pd.MultiIndex):
+                selected.columns = [
+                    next((str(part) for part in reversed(column) if str(part)), str(column[-1]))
+                    for column in selected.columns
+                ]
+
+        close_column = None
+        for candidate in ("Close", "close", "Adj Close", "adj close"):
+            if candidate in selected.columns:
+                close_column = candidate
+                break
+        if close_column is None:
+            return None
+
+        series = selected[close_column]
+        if hasattr(series, "columns"):
+            series = series.iloc[:, 0]
+        series = pd.to_numeric(series, errors="coerce").dropna()
+        if series.empty:
+            return None
+
+        index = pd.DatetimeIndex(pd.to_datetime(series.index))
+        if getattr(index, "tz", None) is None:
+            index = index.tz_localize(ET_TZ)
+        index = index.tz_convert(UTC)
+        series.index = index
+        target = pd.Timestamp(target_utc)
+        if target.tzinfo is None:
+            target = target.tz_localize(UTC)
+        else:
+            target = target.tz_convert(UTC)
+
+        candidates = series[series.index <= target]
+        if candidates.empty:
+            return None
+        price = float(candidates.iloc[-1])
+        return price if price > 0 else None
+    except Exception as exc:
+        _price_log(f"[Price API] yfinance parse error for {symbol}: {exc}")
+        return None
+
+
+def _get_yfinance_us_stock_price(symbol: str, executed_at: str) -> Optional[float]:
+    """Best-effort Yahoo Finance fallback for US stock prices via yfinance."""
+    target_utc = _parse_executed_at_to_utc(executed_at)
+    if not target_utc:
+        return None
+
+    yf_symbol = _normalize_yfinance_us_symbol(symbol)
+    if not yf_symbol:
+        return None
+
+    try:
+        intraday_start = (target_utc - timedelta(days=1)).date().isoformat()
+        intraday_end = (target_utc + timedelta(days=1)).date().isoformat()
+        frame = _download_yfinance_history(yf_symbol, intraday_start, intraday_end, "1m")
+        price = _extract_yfinance_close_price(frame, yf_symbol, target_utc)
+        if price is not None:
+            _price_log(f"[Price API] yfinance fallback fetched {yf_symbol}: ${price}")
+            return price
+
+        daily_start = (target_utc - timedelta(days=10)).date().isoformat()
+        daily_end = (target_utc + timedelta(days=1)).date().isoformat()
+        frame = _download_yfinance_history(yf_symbol, daily_start, daily_end, "1d")
+        price = _extract_yfinance_close_price(frame, yf_symbol, target_utc)
+        if price is not None:
+            _price_log(f"[Price API] yfinance daily fallback fetched {yf_symbol}: ${price}")
+        return price
+    except ImportError as exc:
+        _price_log(f"[Price API] yfinance fallback unavailable: {exc}")
+        return None
+    except Exception as exc:
+        _price_log(f"[Price API] yfinance fallback failed for {yf_symbol}: {exc}")
         return None
 
 

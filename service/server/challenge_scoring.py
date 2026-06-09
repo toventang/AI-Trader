@@ -52,6 +52,8 @@ def score_agent_trades(
     challenge: Any,
     participant: Any,
     trades: list[Any],
+    mark_prices: dict[tuple[str, str], float] | None = None,
+    mark_timestamp: str | None = None,
 ) -> dict[str, Any]:
     challenge_data = _row_dict(challenge)
     participant_data = _row_dict(participant)
@@ -182,6 +184,23 @@ def score_agent_trades(
                 disqualified_reason = 'max_position_pct_exceeded'
                 break
 
+    live_marks: list[dict[str, Any]] = []
+    if mark_prices and positions:
+        for key in positions:
+            live_mark = _safe_float(mark_prices.get(key), 0.0)
+            if live_mark <= 0:
+                continue
+            marks[key] = live_mark
+            live_marks.append({
+                'market': key[0],
+                'symbol': key[1],
+                'price': live_mark,
+            })
+        if live_marks:
+            equity = _portfolio_value(cash, positions, marks)
+            equity_curve.append(equity)
+            update_drawdown(equity)
+
     ending_value = _portfolio_value(cash, positions, marks)
     return_pct = ((ending_value - starting_cash) / starting_cash * 100) if starting_cash > 0 else 0.0
 
@@ -201,6 +220,9 @@ def score_agent_trades(
         'cash': cash,
         'positions': list(positions.values()),
         'equity_curve': equity_curve,
+        'marked_to_market': bool(live_marks),
+        'mark_timestamp': mark_timestamp if live_marks else None,
+        'live_marks': live_marks,
         'scoring_method': scoring_method,
         'allowed_drawdown': allowed_drawdown,
         'drawdown_penalty': drawdown_penalty,
@@ -242,10 +264,17 @@ def score_challenge_results(
     challenge: Any,
     participants: list[Any],
     trades_by_agent: dict[int, list[Any]],
+    mark_prices: dict[tuple[str, str], float] | None = None,
+    mark_timestamp: str | None = None,
 ) -> list[dict[str, Any]]:
     scored = [
-        score_agent_trades(challenge, participant, trades_by_agent.get(_row_dict(participant).get('agent_id'), []))
+        score_agent_trades(
+            challenge,
+            participant,
+            trades_by_agent.get(_row_dict(participant).get('agent_id'), []),
+            mark_prices=mark_prices,
+            mark_timestamp=mark_timestamp,
+        )
         for participant in participants
     ]
     return rank_scored_results(scored)
-

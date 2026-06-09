@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -70,6 +71,80 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
 
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def _live_mark_timestamp(challenge: dict[str, Any]) -> Optional[str]:
+    if challenge.get('status') != 'active':
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        start_dt = _parse_dt(challenge.get('start_at'))
+        end_dt = _parse_dt(challenge.get('end_at'))
+    except Exception:
+        return None
+    if start_dt and now < start_dt:
+        return None
+    if end_dt and now >= end_dt:
+        return None
+    return _iso(now)
+
+
+def _fetch_live_mark_prices(scored_results: list[dict[str, Any]], mark_timestamp: str) -> dict[tuple[str, str], float]:
+    position_keys: set[tuple[str, str]] = set()
+    for result in scored_results:
+        metrics = result.get('metrics') or {}
+        for position in metrics.get('positions') or []:
+            market = str(position.get('market') or '').strip()
+            symbol = str(position.get('symbol') or '').strip()
+            quantity = position.get('quantity')
+            try:
+                quantity_float = float(quantity)
+            except Exception:
+                quantity_float = 0.0
+            if market and symbol and abs(quantity_float) > 1e-12:
+                position_keys.add((market, symbol))
+
+    if not position_keys:
+        return {}
+
+    try:
+        import price_fetcher
+        from price_fetcher import price_fetch_logging
+    except Exception:
+        return {}
+
+    mark_prices: dict[tuple[str, str], float] = {}
+    with price_fetch_logging(False):
+        for market, symbol in sorted(position_keys):
+            try:
+                price = price_fetcher.get_price_from_market(symbol, mark_timestamp, market)
+                parsed = float(price) if price is not None else 0.0
+            except Exception:
+                continue
+            if math.isfinite(parsed) and parsed > 0:
+                mark_prices[(market, symbol)] = parsed
+    return mark_prices
+
+
+def _score_challenge_results_with_live_marks(
+    challenge: dict[str, Any],
+    participants: list[dict[str, Any]],
+    trades_by_agent: dict[int, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    scored = score_challenge_results(challenge, participants, trades_by_agent)
+    mark_timestamp = _live_mark_timestamp(challenge)
+    if not mark_timestamp:
+        return scored
+    mark_prices = _fetch_live_mark_prices(scored, mark_timestamp)
+    if not mark_prices:
+        return scored
+    return score_challenge_results(
+        challenge,
+        participants,
+        trades_by_agent,
+        mark_prices=mark_prices,
+        mark_timestamp=mark_timestamp,
+    )
 
 
 def _normalize_key(key: Optional[str], title: str) -> str:
@@ -539,8 +614,16 @@ def _serialize_challenge_portfolio(
     challenge: dict[str, Any],
     participant: dict[str, Any],
     trades: list[dict[str, Any]],
+    mark_prices: Optional[dict[tuple[str, str], float]] = None,
+    mark_timestamp: Optional[str] = None,
 ) -> dict[str, Any]:
-    scored = score_agent_trades(challenge, participant, trades)
+    scored = score_agent_trades(
+        challenge,
+        participant,
+        trades,
+        mark_prices=mark_prices,
+        mark_timestamp=mark_timestamp,
+    )
     metrics = scored.get('metrics') or {}
     ending_value = scored.get('ending_value')
     return {
@@ -556,6 +639,9 @@ def _serialize_challenge_portfolio(
             'final_score': scored.get('final_score'),
             'trade_count': scored.get('trade_count'),
             'disqualified_reason': scored.get('disqualified_reason'),
+            'marked_to_market': metrics.get('marked_to_market') or False,
+            'mark_timestamp': metrics.get('mark_timestamp'),
+            'live_marks': metrics.get('live_marks') or [],
             'positions': metrics.get('positions') or [],
             'equity_curve': metrics.get('equity_curve') or [],
         },
@@ -595,7 +681,18 @@ def get_agent_challenge_portfolio(challenge_key: str, agent_id: int) -> dict[str
             (challenge['id'], agent_id),
         )
         trades = [dict(trade) for trade in cursor.fetchall()]
-        return _serialize_challenge_portfolio(challenge, participant, trades)
+        mark_prices: dict[tuple[str, str], float] = {}
+        mark_timestamp = _live_mark_timestamp(challenge)
+        if mark_timestamp:
+            baseline = score_agent_trades(challenge, participant, trades)
+            mark_prices = _fetch_live_mark_prices([baseline], mark_timestamp)
+        return _serialize_challenge_portfolio(
+            challenge,
+            participant,
+            trades,
+            mark_prices=mark_prices,
+            mark_timestamp=mark_timestamp,
+        )
     finally:
         conn.close()
 
@@ -800,11 +897,11 @@ def get_challenge_leaderboard(challenge_key: str) -> dict[str, Any]:
             result_row['agent_identity_status'] = agent_identity_status(row)
             result_row['agent_is_verified'] = agent_is_verified(row)
             result_rows.append(result_row)
-        if result_rows:
+        if result_rows and challenge.get('status') == 'settled':
             return {'challenge': _serialize_challenge(challenge), 'leaderboard': result_rows, 'provisional': False}
 
         participants, trades_by_agent = _fetch_participants_and_trades(cursor, challenge['id'])
-        scored = score_challenge_results(challenge, participants, trades_by_agent)
+        scored = _score_challenge_results_with_live_marks(challenge, participants, trades_by_agent)
         names = {item['agent_id']: item.get('agent_name') for item in participants}
         identities = {item['agent_id']: item.get('agent_identity_status') for item in participants}
         for item in scored:

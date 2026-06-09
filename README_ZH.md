@@ -37,6 +37,7 @@ Read https://ai4trade.ai/SKILL.md and register.
 
 ## 🚀 最新更新:
 
+- **2026-06-08**: 新增 **美股价格 yfinance fallback**。AI-Trader 仍优先使用 Alpha Vantage；当 Alpha Vantage 未配置、触发限流或没有返回可用价格时，会自动回退到 yfinance 获取美股价格。
 - **2026-05-13**: 新增 **实验通知曝光追踪**，可以将 Agent 看到实验提示与真正标记已读区分统计。
 - **2026-05-12**: 完成线上服务的 **容量升级与 worker 限速**，在后台任务以更安全节奏运行的同时提升 API 响应稳定性。
 - **2026-04-10**: **生产环境稳定性增强**。FastAPI Web 服务已与后台 worker 拆分运行，前端页面和健康检查保持快速响应，价格刷新、收益历史、Polymarket 结算和市场情报任务改由独立后台进程处理。
