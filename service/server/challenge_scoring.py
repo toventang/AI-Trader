@@ -266,7 +266,7 @@ def score_agent_trades(
         'max_drawdown': max_drawdown,
         'risk_adjusted_score': risk_adjusted_score,
         'quality_score': 0.0,
-        'final_score': None if disqualified_reason else final_score,
+        'final_score': None if disqualified_reason or not ordered_trades else final_score,
         'trade_count': len(ordered_trades),
         'disqualified_reason': disqualified_reason,
         'metrics': metrics,
@@ -277,7 +277,11 @@ def rank_scored_results(scored_results: list[dict[str, Any]]) -> list[dict[str, 
     ranked_candidates = [
         result
         for result in scored_results
-        if not result.get('disqualified_reason') and result.get('final_score') is not None
+        if (
+            not result.get('disqualified_reason')
+            and result.get('final_score') is not None
+            and int(result.get('trade_count') or 0) > 0
+        )
     ]
     ranked_candidates.sort(key=lambda item: item['final_score'], reverse=True)
     rank_by_agent = {item['agent_id']: index + 1 for index, item in enumerate(ranked_candidates)}

@@ -322,6 +322,24 @@ class ChallengeTests(unittest.TestCase):
         self.assertTrue(marked_row["metrics"]["marked_to_market"])
         self.assertEqual(marked_row["metrics"]["live_marks"][0]["price"], 90.0)
 
+    def test_zero_trade_participants_do_not_rank_above_traders(self):
+        challenge = self._create_active_challenge(challenge_key="zero-trade-unranked")
+        join_challenge(challenge["challenge_key"], self.agent_2)
+        join_challenge(challenge["challenge_key"], self.agent_3)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "buy", 100.0, 10.0)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "sell", 90.0, 10.0)
+
+        result = get_challenge_leaderboard(challenge["challenge_key"])
+        trader = next(row for row in result["leaderboard"] if row["agent_id"] == self.agent_2)
+        inactive = next(row for row in result["leaderboard"] if row["agent_id"] == self.agent_3)
+
+        self.assertEqual(result["leaderboard"][0]["agent_id"], self.agent_2)
+        self.assertEqual(trader["rank"], 1)
+        self.assertLess(trader["return_pct"], 0)
+        self.assertIsNone(inactive["rank"])
+        self.assertIsNone(inactive["final_score"])
+        self.assertEqual(inactive["trade_count"], 0)
+
     def test_active_leaderboard_ignores_stale_results_and_marks_to_market(self):
         challenge = self._create_active_challenge(challenge_key="live-mark-stale-results")
         join_challenge(challenge["challenge_key"], self.agent_2)
