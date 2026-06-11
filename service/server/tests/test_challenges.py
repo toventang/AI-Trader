@@ -177,6 +177,11 @@ class ChallengeTests(unittest.TestCase):
         self.assertEqual(cursor.fetchone()["count"], 0)
         cursor.execute("SELECT cash FROM agents WHERE id = ?", (self.agent_2,))
         self.assertEqual(cursor.fetchone()["cash"], 100000.0)
+        cursor.execute(
+            "SELECT trade_count FROM challenge_participants WHERE challenge_id = ? AND agent_id = ?",
+            (challenge["id"], self.agent_2),
+        )
+        self.assertEqual(cursor.fetchone()["trade_count"], 1)
         cursor.execute("SELECT COUNT(*) AS count FROM experiment_events WHERE event_type = 'challenge_trade_submitted'")
         self.assertEqual(cursor.fetchone()["count"], 1)
         conn.close()
@@ -207,6 +212,97 @@ class ChallengeTests(unittest.TestCase):
         cursor.execute("SELECT COUNT(*) AS count FROM challenge_trades WHERE challenge_id = ?", (challenge["id"],))
         self.assertEqual(cursor.fetchone()["count"], 0)
         conn.close()
+
+    def test_polymarket_challenge_trade_requires_resolved_contract(self):
+        challenge = self._create_active_challenge(
+            challenge_key="poly-trade-no-contract",
+            market="polymarket",
+            symbol="will-btc-be-above-120k-on-june-30",
+        )
+        join_challenge(challenge["challenge_key"], self.agent_2)
+
+        with self.assertRaises(ChallengeError):
+            create_challenge_trade(
+                challenge["challenge_key"],
+                agent_id=self.agent_2,
+                data={
+                    "symbol": "will-btc-be-above-120k-on-june-30",
+                    "side": "buy",
+                    "price": 0.5,
+                    "quantity": 10.0,
+                    "executed_at": iso(datetime.now(timezone.utc)),
+                },
+            )
+
+        conn = database.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS count FROM challenge_trades WHERE challenge_id = ?", (challenge["id"],))
+        self.assertEqual(cursor.fetchone()["count"], 0)
+        conn.close()
+
+    def test_polymarket_challenge_trade_rejects_stale_execution_time(self):
+        now = datetime.now(timezone.utc)
+        challenge = self._create_active_challenge(
+            challenge_key="poly-trade-stale-time",
+            market="polymarket",
+            symbol="will-btc-be-above-120k-on-june-30",
+            start_at=iso(now - timedelta(hours=2)),
+            end_at=iso(now + timedelta(hours=1)),
+        )
+        join_challenge(challenge["challenge_key"], self.agent_2)
+
+        with self.assertRaises(ChallengeError):
+            create_challenge_trade(
+                challenge["challenge_key"],
+                agent_id=self.agent_2,
+                data={
+                    "symbol": "will-btc-be-above-120k-on-june-30",
+                    "token_id": "123456789",
+                    "outcome": "Yes",
+                    "side": "buy",
+                    "price": 0.5,
+                    "quantity": 10.0,
+                    "executed_at": iso(now - timedelta(hours=1)),
+                },
+            )
+
+    def test_polymarket_challenge_trade_marks_by_token(self):
+        challenge = self._create_active_challenge(
+            challenge_key="poly-live-mark-token",
+            market="polymarket",
+            symbol="will-btc-be-above-120k-on-june-30",
+        )
+        join_challenge(challenge["challenge_key"], self.agent_2)
+
+        with patch(
+            "price_fetcher.describe_polymarket_contract",
+            return_value={"token_id": "123456789", "outcome": "Yes"},
+        ), patch("price_fetcher.get_price_from_market", side_effect=[0.42, 0.55]) as mock_price:
+            result = create_challenge_trade(
+                challenge["challenge_key"],
+                agent_id=self.agent_2,
+                data={
+                    "symbol": "will-btc-be-above-120k-on-june-30",
+                    "token_id": "123456789",
+                    "outcome": "Yes",
+                    "side": "buy",
+                    "price": 0.01,
+                    "quantity": 100.0,
+                    "executed_at": iso(datetime.now(timezone.utc)),
+                },
+            )
+            portfolio = get_agent_challenge_portfolio(challenge["challenge_key"], self.agent_2)
+
+        self.assertEqual(result["trade"]["token_id"], "123456789")
+        self.assertEqual(result["trade"]["outcome"], "Yes")
+        self.assertEqual(result["trade"]["price"], 0.42)
+        self.assertTrue(portfolio["portfolio"]["marked_to_market"])
+        self.assertAlmostEqual(portfolio["portfolio"]["ending_value"], 1013.0)
+        self.assertAlmostEqual(portfolio["portfolio"]["return_pct"], 1.3)
+        self.assertEqual(portfolio["portfolio"]["positions"][0]["token_id"], "123456789")
+        self.assertEqual(portfolio["portfolio"]["live_marks"][0]["token_id"], "123456789")
+        self.assertEqual(mock_price.call_args_list[-1].kwargs["token_id"], "123456789")
+        self.assertEqual(mock_price.call_args_list[-1].kwargs["outcome"], "Yes")
 
     def test_active_leaderboard_marks_open_positions_to_market(self):
         challenge = self._create_active_challenge(challenge_key="live-mark-leaderboard")

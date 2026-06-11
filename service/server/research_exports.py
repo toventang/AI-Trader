@@ -46,7 +46,8 @@ CHALLENGE_EXPORTS: dict[str, dict[str, Any]] = {
         'join': 'JOIN challenges c ON c.id = ct.challenge_id',
         'columns': [
             'id', 'challenge_id', 'agent_id', 'source_signal_id', 'market',
-            'symbol', 'side', 'price', 'quantity', 'executed_at', 'created_at',
+            'symbol', 'token_id', 'outcome', 'side', 'price', 'quantity',
+            'executed_at', 'created_at',
         ],
     },
     'challenge_results.csv': {
@@ -883,6 +884,7 @@ RESEARCH_EXPORTS = {
             ("id", "ct.id"), ("challenge_id", "ct.challenge_id"), ("challenge_key", "c.challenge_key"),
             ("agent_id", "ct.agent_id"), ("agent_hash", "ct.agent_id"),
             ("source_signal_id", "ct.source_signal_id"), ("market", "ct.market"), ("symbol", "ct.symbol"),
+            ("token_id", "ct.token_id"), ("outcome", "ct.outcome"),
             ("side", "ct.side"), ("price", "ct.price"), ("quantity", "ct.quantity"),
             ("executed_at", "ct.executed_at"), ("created_at", "ct.created_at"),
             ("experiment_key", "c.experiment_key"),

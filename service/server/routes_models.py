@@ -117,6 +117,8 @@ class ChallengeSubmissionRequest(BaseModel):
 class ChallengeTradeRequest(BaseModel):
     side: str
     symbol: Optional[str] = None
+    token_id: Optional[str] = None
+    outcome: Optional[str] = None
     price: float
     quantity: float
     content: Optional[str] = None

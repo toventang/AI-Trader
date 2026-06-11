@@ -380,6 +380,8 @@ def _ensure_challenge_trades_source_signal_nullable(cursor: Any) -> None:
             source_signal_id INTEGER,
             market TEXT NOT NULL,
             symbol TEXT NOT NULL,
+            token_id TEXT,
+            outcome TEXT,
             side TEXT NOT NULL,
             price REAL NOT NULL,
             quantity REAL NOT NULL,
@@ -831,6 +833,8 @@ def init_database():
             source_signal_id INTEGER,
             market TEXT NOT NULL,
             symbol TEXT NOT NULL,
+            token_id TEXT,
+            outcome TEXT,
             side TEXT NOT NULL,
             price REAL NOT NULL,
             quantity REAL NOT NULL,
@@ -860,6 +864,16 @@ def init_database():
     """)
 
     _ensure_challenge_trades_source_signal_nullable(cursor)
+
+    try:
+        cursor.execute("ALTER TABLE challenge_trades ADD COLUMN token_id TEXT")
+    except Exception:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE challenge_trades ADD COLUMN outcome TEXT")
+    except Exception:
+        pass
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS signal_predictions (

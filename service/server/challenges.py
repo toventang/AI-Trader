@@ -27,7 +27,8 @@ class ChallengeNotFound(ChallengeError):
 DEFAULT_CHALLENGE_REWARDS = {'1': 100, '2': 50, '3': 25}
 SUPPORTED_SCORING_METHODS = {'return-only', 'risk-adjusted'}
 SUPPORTED_CHALLENGE_TRACKS = {'crypto', 'us-stock', 'polymarket'}
-AUTHORITATIVE_CHALLENGE_PRICE_MARKETS = {'crypto', 'us-stock'}
+AUTHORITATIVE_CHALLENGE_PRICE_MARKETS = {'crypto', 'us-stock', 'polymarket'}
+POLYMARKET_CHALLENGE_CLOCK_SKEW_SECONDS = 300
 
 
 def _row_dict(row: Any) -> dict[str, Any]:
@@ -90,20 +91,24 @@ def _live_mark_timestamp(challenge: dict[str, Any]) -> Optional[str]:
     return _iso(now)
 
 
-def _fetch_live_mark_prices(scored_results: list[dict[str, Any]], mark_timestamp: str) -> dict[tuple[str, str], float]:
-    position_keys: set[tuple[str, str]] = set()
+def _fetch_live_mark_prices(scored_results: list[dict[str, Any]], mark_timestamp: str) -> dict[tuple[str, str, str, str], float]:
+    position_keys: set[tuple[str, str, str, str]] = set()
     for result in scored_results:
         metrics = result.get('metrics') or {}
         for position in metrics.get('positions') or []:
             market = str(position.get('market') or '').strip()
             symbol = str(position.get('symbol') or '').strip()
+            token_id = str(position.get('token_id') or '').strip()
+            outcome = str(position.get('outcome') or '').strip()
             quantity = position.get('quantity')
             try:
                 quantity_float = float(quantity)
             except Exception:
                 quantity_float = 0.0
             if market and symbol and abs(quantity_float) > 1e-12:
-                position_keys.add((market, symbol))
+                if market == 'polymarket' and not (token_id or outcome):
+                    continue
+                position_keys.add((market, symbol, token_id, outcome))
 
     if not position_keys:
         return {}
@@ -114,20 +119,59 @@ def _fetch_live_mark_prices(scored_results: list[dict[str, Any]], mark_timestamp
     except Exception:
         return {}
 
-    mark_prices: dict[tuple[str, str], float] = {}
+    mark_prices: dict[tuple[str, str, str, str], float] = {}
     with price_fetch_logging(False):
-        for market, symbol in sorted(position_keys):
+        for market, symbol, token_id, outcome in sorted(position_keys):
             try:
-                price = price_fetcher.get_price_from_market(symbol, mark_timestamp, market)
+                price = price_fetcher.get_price_from_market(
+                    symbol,
+                    mark_timestamp,
+                    market,
+                    token_id=token_id or None,
+                    outcome=outcome or None,
+                )
                 parsed = float(price) if price is not None else 0.0
             except Exception:
                 continue
             if math.isfinite(parsed) and parsed > 0:
-                mark_prices[(market, symbol)] = parsed
+                mark_prices[(market, symbol, token_id, outcome)] = parsed
     return mark_prices
 
 
-def _fetch_authoritative_challenge_trade_price(market: str, symbol: str, executed_at: str) -> Optional[float]:
+def _resolve_polymarket_challenge_contract(symbol: str, token_id: Any = None, outcome: Any = None) -> tuple[Optional[str], Optional[str]]:
+    resolved_token_id = str(token_id or '').strip() or None
+    resolved_outcome = str(outcome or '').strip() or None
+    if not (resolved_token_id or resolved_outcome):
+        raise ChallengeError('Polymarket challenge trades require an explicit token_id or outcome')
+
+    try:
+        import price_fetcher
+        from price_fetcher import price_fetch_logging
+    except Exception as exc:
+        raise ChallengeError('Server price fetcher is unavailable') from exc
+
+    with price_fetch_logging(False):
+        try:
+            contract = price_fetcher.describe_polymarket_contract(
+                symbol,
+                token_id=resolved_token_id,
+                outcome=resolved_outcome,
+            )
+        except Exception as exc:
+            raise ChallengeError(f'Unable to resolve Polymarket contract for {symbol}') from exc
+
+    if not contract or not contract.get('token_id'):
+        raise ChallengeError('Polymarket challenge trade must resolve to a single outcome token')
+    return str(contract.get('token_id') or '').strip() or None, str(contract.get('outcome') or resolved_outcome or '').strip() or None
+
+
+def _fetch_authoritative_challenge_trade_price(
+    market: str,
+    symbol: str,
+    executed_at: str,
+    token_id: Any = None,
+    outcome: Any = None,
+) -> Optional[float]:
     if market not in AUTHORITATIVE_CHALLENGE_PRICE_MARKETS:
         return None
 
@@ -139,7 +183,13 @@ def _fetch_authoritative_challenge_trade_price(market: str, symbol: str, execute
 
     with price_fetch_logging(False):
         try:
-            price = price_fetcher.get_price_from_market(symbol, executed_at, market)
+            price = price_fetcher.get_price_from_market(
+                symbol,
+                executed_at,
+                market,
+                token_id=str(token_id or '').strip() or None,
+                outcome=str(outcome or '').strip() or None,
+            )
         except Exception as exc:
             raise ChallengeError(f'Unable to fetch server price for {symbol}') from exc
 
@@ -149,6 +199,8 @@ def _fetch_authoritative_challenge_trade_price(market: str, symbol: str, execute
         parsed = 0.0
     if not math.isfinite(parsed) or parsed <= 0:
         raise ChallengeError(f'Unable to fetch server price for {symbol}')
+    if market == 'polymarket' and parsed > 1:
+        raise ChallengeError(f'Invalid Polymarket price for {symbol}')
     return parsed
 
 
@@ -640,7 +692,7 @@ def _serialize_challenge_portfolio(
     challenge: dict[str, Any],
     participant: dict[str, Any],
     trades: list[dict[str, Any]],
-    mark_prices: Optional[dict[tuple[str, str], float]] = None,
+    mark_prices: Optional[dict[Any, float]] = None,
     mark_timestamp: Optional[str] = None,
 ) -> dict[str, Any]:
     scored = score_agent_trades(
@@ -707,7 +759,7 @@ def get_agent_challenge_portfolio(challenge_key: str, agent_id: int) -> dict[str
             (challenge['id'], agent_id),
         )
         trades = [dict(trade) for trade in cursor.fetchall()]
-        mark_prices: dict[tuple[str, str], float] = {}
+        mark_prices: dict[Any, float] = {}
         mark_timestamp = _live_mark_timestamp(challenge)
         if mark_timestamp:
             baseline = score_agent_trades(challenge, participant, trades)
@@ -749,6 +801,10 @@ def create_challenge_trade(challenge_key: str, agent_id: int, data: Any) -> dict
         executed_dt = _parse_dt(executed_at)
         if executed_dt < _parse_dt(challenge['start_at']) or executed_dt > _parse_dt(challenge['end_at']):
             raise ChallengeError('Challenge trade must be inside challenge time window')
+        if challenge['market'] == 'polymarket':
+            current_dt = datetime.now(timezone.utc)
+            if abs((current_dt - executed_dt).total_seconds()) > POLYMARKET_CHALLENGE_CLOCK_SKEW_SECONDS:
+                raise ChallengeError('Polymarket challenge trades must use current execution time')
 
         cursor.execute(
             """
@@ -769,8 +825,20 @@ def create_challenge_trade(challenge_key: str, agent_id: int, data: Any) -> dict
             raise ChallengeError('Challenge participant is not tradeable')
 
         symbol = _normalize_challenge_trade_symbol(challenge, payload.get('symbol'))
+        token_id = str(payload.get('token_id') or '').strip() or None
+        outcome = str(payload.get('outcome') or '').strip() or None
+        if challenge['market'] == 'polymarket':
+            if side in {'short', 'cover'}:
+                raise ChallengeError('Polymarket challenge trades support buy/sell outcome tokens only')
+            token_id, outcome = _resolve_polymarket_challenge_contract(symbol, token_id=token_id, outcome=outcome)
         requested_price = price
-        server_price = _fetch_authoritative_challenge_trade_price(challenge['market'], symbol, executed_at)
+        server_price = _fetch_authoritative_challenge_trade_price(
+            challenge['market'],
+            symbol,
+            executed_at,
+            token_id=token_id,
+            outcome=outcome,
+        )
         if server_price is not None:
             price = server_price
         cursor.execute(
@@ -787,6 +855,8 @@ def create_challenge_trade(challenge_key: str, agent_id: int, data: Any) -> dict
             'id': (max([int(trade.get('id') or 0) for trade in existing_trades], default=0) + 1),
             'market': challenge['market'],
             'symbol': symbol,
+            'token_id': token_id,
+            'outcome': outcome,
             'side': side,
             'price': price,
             'quantity': quantity,
@@ -801,8 +871,8 @@ def create_challenge_trade(challenge_key: str, agent_id: int, data: Any) -> dict
         cursor.execute(
             """
             INSERT INTO challenge_trades
-            (challenge_id, agent_id, source_signal_id, market, symbol, side, price, quantity, executed_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (challenge_id, agent_id, source_signal_id, market, symbol, token_id, outcome, side, price, quantity, executed_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 challenge['id'],
@@ -810,6 +880,8 @@ def create_challenge_trade(challenge_key: str, agent_id: int, data: Any) -> dict
                 None,
                 challenge['market'],
                 symbol,
+                token_id,
+                outcome,
                 side,
                 price,
                 quantity,
@@ -818,6 +890,15 @@ def create_challenge_trade(challenge_key: str, agent_id: int, data: Any) -> dict
             ),
         )
         trade_id = cursor.lastrowid
+        updated_trade_count = len(existing_trades) + 1
+        cursor.execute(
+            """
+            UPDATE challenge_participants
+            SET trade_count = ?
+            WHERE challenge_id = ? AND agent_id = ?
+            """,
+            (updated_trade_count, challenge['id'], agent_id),
+        )
         content = (payload.get('content') or '').strip() or None
         if content:
             _create_submission_with_cursor(
@@ -841,10 +922,13 @@ def create_challenge_trade(challenge_key: str, agent_id: int, data: Any) -> dict
                 'challenge_key': challenge['challenge_key'],
                 'challenge_id': challenge['id'],
                 'symbol': symbol,
+                'token_id': token_id,
+                'outcome': outcome,
                 'side': side,
                 'price': price,
                 'requested_price': requested_price,
                 'quantity': quantity,
+                'trade_count': updated_trade_count,
             },
             cursor=cursor,
         )

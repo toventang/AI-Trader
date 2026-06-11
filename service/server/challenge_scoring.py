@@ -6,6 +6,8 @@ import json
 import math
 from typing import Any
 
+PositionKey = tuple[str, str, str, str]
+
 
 def _row_dict(row: Any) -> dict[str, Any]:
     return dict(row) if row is not None and not isinstance(row, dict) else (row or {})
@@ -40,10 +42,26 @@ def _position_value(position: dict[str, Any], mark_price: float) -> float:
     return (2 * entry - mark_price) * abs(qty)
 
 
-def _portfolio_value(cash: float, positions: dict[tuple[str, str], dict[str, Any]], marks: dict[tuple[str, str], float]) -> float:
+def _position_key(market: str, symbol: str, token_id: Any = None, outcome: Any = None) -> PositionKey:
+    token = str(token_id or '').strip()
+    resolved_outcome = str(outcome or '').strip()
+    if market != 'polymarket':
+        token = ''
+        resolved_outcome = ''
+    return (market, symbol, token, resolved_outcome)
+
+
+def _mark_price(marks: dict[Any, float], key: PositionKey) -> float:
+    mark = marks.get(key)
+    if mark is None:
+        mark = marks.get((key[0], key[1]))
+    return _safe_float(mark, 0.0)
+
+
+def _portfolio_value(cash: float, positions: dict[PositionKey, dict[str, Any]], marks: dict[Any, float]) -> float:
     value = cash
     for key, position in positions.items():
-        mark_price = marks.get(key) or _safe_float(position.get('entry_price'))
+        mark_price = _mark_price(marks, key) or _safe_float(position.get('entry_price'))
         value += _position_value(position, mark_price)
     return value
 
@@ -52,7 +70,7 @@ def score_agent_trades(
     challenge: Any,
     participant: Any,
     trades: list[Any],
-    mark_prices: dict[tuple[str, str], float] | None = None,
+    mark_prices: dict[Any, float] | None = None,
     mark_timestamp: str | None = None,
 ) -> dict[str, Any]:
     challenge_data = _row_dict(challenge)
@@ -67,8 +85,8 @@ def score_agent_trades(
     max_drawdown_pct = _safe_float(challenge_data.get('max_drawdown_pct'), 100.0)
 
     cash = starting_cash
-    positions: dict[tuple[str, str], dict[str, Any]] = {}
-    marks: dict[tuple[str, str], float] = {}
+    positions: dict[PositionKey, dict[str, Any]] = {}
+    marks: dict[Any, float] = {}
     equity_curve = [starting_cash]
     peak = starting_cash
     max_drawdown = 0.0
@@ -92,7 +110,9 @@ def score_agent_trades(
         side = str(trade.get('side') or '').lower()
         market = str(trade.get('market') or '')
         symbol = str(trade.get('symbol') or '')
-        key = (market, symbol)
+        token_id = str(trade.get('token_id') or '').strip() or None
+        outcome = str(trade.get('outcome') or '').strip() or None
+        key = _position_key(market, symbol, token_id, outcome)
         price = _safe_float(trade.get('price'))
         quantity = _safe_float(trade.get('quantity'))
 
@@ -119,6 +139,8 @@ def score_agent_trades(
             positions[key] = {
                 'market': market,
                 'symbol': symbol,
+                'token_id': token_id,
+                'outcome': outcome,
                 'quantity': new_qty,
                 'entry_price': new_entry,
             }
@@ -134,6 +156,8 @@ def score_agent_trades(
                 positions[key] = {
                     'market': market,
                     'symbol': symbol,
+                    'token_id': token_id,
+                    'outcome': outcome,
                     'quantity': new_qty,
                     'entry_price': current_entry,
                 }
@@ -152,6 +176,8 @@ def score_agent_trades(
             positions[key] = {
                 'market': market,
                 'symbol': symbol,
+                'token_id': token_id,
+                'outcome': outcome,
                 'quantity': new_qty,
                 'entry_price': new_entry,
             }
@@ -167,6 +193,8 @@ def score_agent_trades(
                 positions[key] = {
                     'market': market,
                     'symbol': symbol,
+                    'token_id': token_id,
+                    'outcome': outcome,
                     'quantity': new_qty,
                     'entry_price': current_entry,
                 }
@@ -179,7 +207,7 @@ def score_agent_trades(
         update_drawdown(equity)
 
         if max_position_pct > 0 and equity > 0:
-            max_notional = max((abs(pos['quantity']) * (marks.get(pos_key) or pos['entry_price'])) for pos_key, pos in positions.items()) if positions else 0.0
+            max_notional = max((abs(pos['quantity']) * (_mark_price(marks, pos_key) or pos['entry_price'])) for pos_key, pos in positions.items()) if positions else 0.0
             if (max_notional / equity) * 100 > max_position_pct + 1e-9:
                 disqualified_reason = 'max_position_pct_exceeded'
                 break
@@ -187,13 +215,15 @@ def score_agent_trades(
     live_marks: list[dict[str, Any]] = []
     if mark_prices and positions:
         for key in positions:
-            live_mark = _safe_float(mark_prices.get(key), 0.0)
+            live_mark = _mark_price(mark_prices, key)
             if live_mark <= 0:
                 continue
             marks[key] = live_mark
             live_marks.append({
                 'market': key[0],
                 'symbol': key[1],
+                'token_id': key[2] or None,
+                'outcome': key[3] or None,
                 'price': live_mark,
             })
         if live_marks:
@@ -264,7 +294,7 @@ def score_challenge_results(
     challenge: Any,
     participants: list[Any],
     trades_by_agent: dict[int, list[Any]],
-    mark_prices: dict[tuple[str, str], float] | None = None,
+    mark_prices: dict[Any, float] | None = None,
     mark_timestamp: str | None = None,
 ) -> list[dict[str, Any]]:
     scored = [
