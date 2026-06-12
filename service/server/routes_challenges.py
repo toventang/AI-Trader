@@ -10,13 +10,22 @@ from challenges import (
     cancel_challenge,
     create_challenge,
     create_challenge_trade,
+    create_challenge_submission_vote,
+    create_challenge_team,
+    create_challenge_team_submission,
+    create_challenge_team_trade,
     create_submission,
     get_agent_challenges,
     get_agent_challenge_portfolio,
     get_challenge,
     get_challenge_leaderboard,
     get_challenge_submissions,
+    get_challenge_team_leaderboard,
+    get_challenge_team_portfolio,
+    get_challenge_team_submissions,
     join_challenge,
+    join_challenge_team,
+    list_challenge_teams,
     list_challenges,
     settle_challenge,
 )
@@ -30,6 +39,10 @@ from permissions import require_admin
 from routes_models import (
     ChallengeCreateRequest,
     ChallengeJoinRequest,
+    ChallengeSubmissionVoteRequest,
+    ChallengeTeamCreateRequest,
+    ChallengeTeamJoinRequest,
+    ChallengeTeamSubmissionRequest,
     ChallengeTradeRequest,
     ExperimentNotificationRequest,
     ChallengeSettleRequest,
@@ -100,6 +113,20 @@ def register_challenge_routes(app: FastAPI, ctx: RouteContext) -> None:
         except Exception as exc:
             raise _to_http_error(exc)
 
+    @app.get('/api/challenges/{challenge_key}/team-leaderboard')
+    async def api_challenge_team_leaderboard(challenge_key: str):
+        try:
+            return get_challenge_team_leaderboard(challenge_key)
+        except Exception as exc:
+            raise _to_http_error(exc)
+
+    @app.get('/api/challenges/{challenge_key}/teams')
+    async def api_challenge_teams(challenge_key: str):
+        try:
+            return list_challenge_teams(challenge_key)
+        except Exception as exc:
+            raise _to_http_error(exc)
+
     @app.get('/api/challenges/{challenge_key}/submissions')
     async def api_challenge_submissions(challenge_key: str, limit: int = 100, offset: int = 0):
         try:
@@ -116,6 +143,31 @@ def register_challenge_routes(app: FastAPI, ctx: RouteContext) -> None:
         agent = _require_agent(authorization)
         try:
             return join_challenge(challenge_key, agent['id'], data)
+        except Exception as exc:
+            raise _to_http_error(exc)
+
+    @app.post('/api/challenges/{challenge_key}/teams')
+    async def api_create_challenge_team(
+        challenge_key: str,
+        data: ChallengeTeamCreateRequest,
+        authorization: str = Header(None),
+    ):
+        agent = _require_agent(authorization)
+        try:
+            return create_challenge_team(challenge_key, agent['id'], data)
+        except Exception as exc:
+            raise _to_http_error(exc)
+
+    @app.post('/api/challenges/{challenge_key}/teams/{team_id}/join')
+    async def api_join_challenge_team(
+        challenge_key: str,
+        team_id: int,
+        data: ChallengeTeamJoinRequest | None = None,
+        authorization: str = Header(None),
+    ):
+        agent = _require_agent(authorization)
+        try:
+            return join_challenge_team(challenge_key, team_id, agent['id'], data)
         except Exception as exc:
             raise _to_http_error(exc)
 
@@ -139,6 +191,40 @@ def register_challenge_routes(app: FastAPI, ctx: RouteContext) -> None:
         except Exception as exc:
             raise _to_http_error(exc)
 
+    @app.get('/api/challenges/{challenge_key}/teams/{team_id}/portfolio')
+    async def api_challenge_team_portfolio(challenge_key: str, team_id: int, authorization: str = Header(None)):
+        agent = _require_agent(authorization)
+        try:
+            return get_challenge_team_portfolio(challenge_key, team_id, agent['id'])
+        except Exception as exc:
+            raise _to_http_error(exc)
+
+    @app.get('/api/challenges/{challenge_key}/teams/{team_id}/submissions')
+    async def api_challenge_team_submissions(
+        challenge_key: str,
+        team_id: int,
+        limit: int = 100,
+        offset: int = 0,
+        authorization: str = Header(None),
+    ):
+        viewer_agent_id = None
+        token = _extract_token(authorization)
+        if token:
+            agent = _get_agent_by_token(token)
+            if not agent:
+                raise HTTPException(status_code=401, detail='Invalid token')
+            viewer_agent_id = agent['id']
+        try:
+            return get_challenge_team_submissions(
+                challenge_key,
+                team_id,
+                viewer_agent_id=viewer_agent_id,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:
+            raise _to_http_error(exc)
+
     @app.post('/api/challenges/{challenge_key}/trade')
     async def api_challenge_trade(
         challenge_key: str,
@@ -148,6 +234,45 @@ def register_challenge_routes(app: FastAPI, ctx: RouteContext) -> None:
         agent = _require_agent(authorization)
         try:
             return create_challenge_trade(challenge_key, agent['id'], data)
+        except Exception as exc:
+            raise _to_http_error(exc)
+
+    @app.post('/api/challenges/{challenge_key}/teams/{team_id}/trade')
+    async def api_challenge_team_trade(
+        challenge_key: str,
+        team_id: int,
+        data: ChallengeTradeRequest,
+        authorization: str = Header(None),
+    ):
+        agent = _require_agent(authorization)
+        try:
+            return create_challenge_team_trade(challenge_key, team_id, agent['id'], data)
+        except Exception as exc:
+            raise _to_http_error(exc)
+
+    @app.post('/api/challenges/{challenge_key}/teams/{team_id}/submissions')
+    async def api_challenge_team_submission(
+        challenge_key: str,
+        team_id: int,
+        data: ChallengeTeamSubmissionRequest,
+        authorization: str = Header(None),
+    ):
+        agent = _require_agent(authorization)
+        try:
+            return create_challenge_team_submission(challenge_key, team_id, agent['id'], data)
+        except Exception as exc:
+            raise _to_http_error(exc)
+
+    @app.post('/api/challenges/{challenge_key}/submissions/{submission_id}/vote')
+    async def api_challenge_submission_vote(
+        challenge_key: str,
+        submission_id: int,
+        data: ChallengeSubmissionVoteRequest,
+        authorization: str = Header(None),
+    ):
+        agent = _require_agent(authorization)
+        try:
+            return create_challenge_submission_vote(challenge_key, submission_id, agent['id'], data)
         except Exception as exc:
             raise _to_http_error(exc)
 

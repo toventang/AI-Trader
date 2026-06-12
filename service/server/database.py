@@ -772,6 +772,7 @@ def init_database():
             market TEXT NOT NULL,
             symbol TEXT,
             challenge_type TEXT NOT NULL,
+            mode TEXT DEFAULT 'individual',
             status TEXT DEFAULT 'upcoming',
             scoring_method TEXT DEFAULT 'return-only',
             initial_capital REAL DEFAULT 100000.0,
@@ -806,6 +807,100 @@ def init_database():
             disqualified_reason TEXT,
             UNIQUE(challenge_id, agent_id),
             FOREIGN KEY (challenge_id) REFERENCES challenges(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS challenge_teams (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            challenge_id INTEGER NOT NULL,
+            team_key TEXT NOT NULL,
+            name TEXT NOT NULL,
+            status TEXT DEFAULT 'active',
+            variant_key TEXT,
+            created_by_agent_id INTEGER NOT NULL,
+            starting_cash REAL DEFAULT 100000.0,
+            ending_value REAL,
+            return_pct REAL,
+            max_drawdown REAL,
+            trade_count INTEGER DEFAULT 0,
+            rank INTEGER,
+            disqualified_reason TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(challenge_id, team_key),
+            FOREIGN KEY (challenge_id) REFERENCES challenges(id),
+            FOREIGN KEY (created_by_agent_id) REFERENCES agents(id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS challenge_team_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            challenge_id INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
+            agent_id INTEGER NOT NULL,
+            role TEXT DEFAULT 'member',
+            status TEXT DEFAULT 'active',
+            variant_key TEXT,
+            joined_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(challenge_id, agent_id),
+            UNIQUE(team_id, agent_id),
+            FOREIGN KEY (challenge_id) REFERENCES challenges(id),
+            FOREIGN KEY (team_id) REFERENCES challenge_teams(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS challenge_team_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            challenge_id INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
+            agent_id INTEGER NOT NULL,
+            market TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            token_id TEXT,
+            outcome TEXT,
+            side TEXT NOT NULL,
+            price REAL NOT NULL,
+            quantity REAL NOT NULL,
+            executed_at TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (challenge_id) REFERENCES challenges(id),
+            FOREIGN KEY (team_id) REFERENCES challenge_teams(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS challenge_team_submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            challenge_id INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
+            agent_id INTEGER NOT NULL,
+            submission_type TEXT NOT NULL,
+            content TEXT,
+            prediction_json TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (challenge_id) REFERENCES challenges(id),
+            FOREIGN KEY (team_id) REFERENCES challenge_teams(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS challenge_submission_votes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            submission_id INTEGER NOT NULL,
+            agent_id INTEGER NOT NULL,
+            vote TEXT NOT NULL,
+            content TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(submission_id, agent_id),
+            FOREIGN KEY (submission_id) REFERENCES challenge_team_submissions(id),
             FOREIGN KEY (agent_id) REFERENCES agents(id)
         )
     """)
@@ -872,6 +967,11 @@ def init_database():
 
     try:
         cursor.execute("ALTER TABLE challenge_trades ADD COLUMN outcome TEXT")
+    except Exception:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE challenges ADD COLUMN mode TEXT DEFAULT 'individual'")
     except Exception:
         pass
 
@@ -1368,6 +1468,11 @@ def init_database():
     """)
 
     cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_challenges_mode_status
+        ON challenges(mode, status)
+    """)
+
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_challenges_key
         ON challenges(challenge_key)
     """)
@@ -1400,6 +1505,26 @@ def init_database():
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_challenge_results_challenge_rank
         ON challenge_results(challenge_id, rank)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_challenge_teams_challenge_rank
+        ON challenge_teams(challenge_id, rank)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_challenge_team_members_agent
+        ON challenge_team_members(agent_id, status)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_challenge_team_trades_team
+        ON challenge_team_trades(team_id, executed_at)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_challenge_team_submissions_team_created
+        ON challenge_team_submissions(team_id, created_at)
     """)
 
     cursor.execute("""

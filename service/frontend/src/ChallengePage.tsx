@@ -9,6 +9,7 @@ type ChallengePageProps = {
 }
 
 const statusValues = ['upcoming', 'active', 'settled'] as const
+const challengeModeValues = ['individual', 'team', 'hybrid'] as const
 type ChallengeTrack = 'all' | 'crypto' | 'us-stock' | 'polymarket'
 
 const challengeTrackValues: Array<{ value: ChallengeTrack, label: string, labelZh: string }> = [
@@ -70,9 +71,14 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
   const [challenges, setChallenges] = useState<any[]>([])
   const [detail, setDetail] = useState<any | null>(null)
   const [leaderboard, setLeaderboard] = useState<any[]>([])
+  const [teamLeaderboard, setTeamLeaderboard] = useState<any[]>([])
+  const [teams, setTeams] = useState<any[]>([])
   const [submissions, setSubmissions] = useState<any[]>([])
+  const [teamSubmissions, setTeamSubmissions] = useState<any[]>([])
   const [myChallenges, setMyChallenges] = useState<any[]>([])
+  const [myTeamChallenges, setMyTeamChallenges] = useState<any[]>([])
   const [challengePortfolio, setChallengePortfolio] = useState<any | null>(null)
+  const [teamPortfolio, setTeamPortfolio] = useState<any | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -82,12 +88,18 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
     challenge_key: '',
     market: 'crypto',
     symbol: 'BTC',
+    mode: 'individual',
     scoring_method: 'return-only',
     max_position_pct: '100',
     max_drawdown_pct: '20',
     end_at: ''
   })
   const [submissionContent, setSubmissionContent] = useState('')
+  const [teamSubmissionContent, setTeamSubmissionContent] = useState('')
+  const [teamForm, setTeamForm] = useState({
+    team_key: '',
+    name: ''
+  })
   const [tradeForm, setTradeForm] = useState({
     side: 'buy',
     symbol: '',
@@ -104,6 +116,7 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
   const loadMyChallenges = async () => {
     if (!token) {
       setMyChallenges([])
+      setMyTeamChallenges([])
       return
     }
     try {
@@ -113,6 +126,7 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
       if (!res.ok) return
       const data = await res.json()
       setMyChallenges(data.challenges || [])
+      setMyTeamChallenges(data.team_challenges || [])
     } catch (e) {
       console.error(e)
     }
@@ -159,6 +173,22 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
       setDetail(detailData)
       setLeaderboard(leaderboardData.leaderboard || [])
       setSubmissions(submissionsData.submissions || [])
+      if (detailData.mode === 'team' || detailData.mode === 'hybrid') {
+        const [teamsRes, teamLeaderboardRes] = await Promise.all([
+          fetch(`${API_BASE}/challenges/${challengeKey}/teams`),
+          fetch(`${API_BASE}/challenges/${challengeKey}/team-leaderboard`)
+        ])
+        const [teamsData, teamLeaderboardData] = await Promise.all([
+          teamsRes.json(),
+          teamLeaderboardRes.json()
+        ])
+        setTeams(teamsRes.ok ? (teamsData.teams || []) : [])
+        setTeamLeaderboard(teamLeaderboardRes.ok ? (teamLeaderboardData.leaderboard || []) : [])
+      } else {
+        setTeams([])
+        setTeamLeaderboard([])
+        setTeamSubmissions([])
+      }
       setTradeForm((current) => {
         const fixedSymbol = fixedSymbolForChallenge(detailData)
         return {
@@ -175,16 +205,52 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
         } else {
           setChallengePortfolio(null)
         }
+        const mineRes = await fetch(`${API_BASE}/challenges/me`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        if (mineRes.ok) {
+          const mineData = await mineRes.json()
+          setMyChallenges(mineData.challenges || [])
+          setMyTeamChallenges(mineData.team_challenges || [])
+          const mineTeam = (mineData.team_challenges || []).find((item: any) => item.id === detailData.id)
+          if (mineTeam?.team_id && (detailData.mode === 'team' || detailData.mode === 'hybrid')) {
+            const authHeaders = { 'Authorization': `Bearer ${token}` }
+            const [teamPortfolioRes, teamSubmissionsRes] = await Promise.all([
+              fetch(`${API_BASE}/challenges/${challengeKey}/teams/${mineTeam.team_id}/portfolio`, {
+                headers: authHeaders
+              }),
+              fetch(`${API_BASE}/challenges/${challengeKey}/teams/${mineTeam.team_id}/submissions`, {
+                headers: authHeaders
+              })
+            ])
+            setTeamPortfolio(teamPortfolioRes.ok ? await teamPortfolioRes.json() : null)
+            if (teamSubmissionsRes.ok) {
+              const teamSubmissionsData = await teamSubmissionsRes.json()
+              setTeamSubmissions(teamSubmissionsData.submissions || [])
+            } else {
+              setTeamSubmissions([])
+            }
+          } else {
+            setTeamPortfolio(null)
+            setTeamSubmissions([])
+          }
+        }
       } else {
         setChallengePortfolio(null)
+        setTeamPortfolio(null)
+        setTeamSubmissions([])
       }
       setError(null)
     } catch (err: any) {
       setError(err?.message || (language === 'zh' ? '挑战详情加载失败' : 'Failed to load challenge detail'))
       setDetail(null)
       setLeaderboard([])
+      setTeamLeaderboard([])
+      setTeams([])
       setSubmissions([])
+      setTeamSubmissions([])
       setChallengePortfolio(null)
+      setTeamPortfolio(null)
     } finally {
       setLoading(false)
     }
@@ -243,6 +309,7 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
           ...createForm,
           challenge_key: createForm.challenge_key || undefined,
           symbol: createForm.symbol || undefined,
+          mode: createForm.mode,
           end_at: endAt,
           max_position_pct: Number(createForm.max_position_pct || 100),
           max_drawdown_pct: Number(createForm.max_drawdown_pct || 20)
@@ -257,6 +324,7 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
         challenge_key: '',
         market: 'crypto',
         symbol: 'BTC',
+        mode: 'individual',
         scoring_method: 'return-only',
         max_position_pct: '100',
         max_drawdown_pct: '20',
@@ -343,16 +411,161 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
     }
   }
 
+  const handleCreateTeam = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!token || !detail || !teamForm.name.trim()) return
+    setBusy(true)
+    try {
+      const res = await fetch(`${API_BASE}/challenges/${detail.challenge_key}/teams`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          team_key: teamForm.team_key || undefined,
+          name: teamForm.name
+        })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'team_create_failed')
+      setTeamForm({ team_key: '', name: '' })
+      await Promise.all([loadMyChallenges(), loadDetail()])
+    } catch (err: any) {
+      alert(err?.message || (language === 'zh' ? '创建团队失败' : 'Failed to create team'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleJoinTeam = async (teamId: number) => {
+    if (!token || !detail) return
+    setBusy(true)
+    try {
+      const res = await fetch(`${API_BASE}/challenges/${detail.challenge_key}/teams/${teamId}/join`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({})
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'team_join_failed')
+      await Promise.all([loadMyChallenges(), loadDetail()])
+    } catch (err: any) {
+      alert(err?.message || (language === 'zh' ? '加入团队失败' : 'Failed to join team'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleTeamTrade = async (e: FormEvent) => {
+    e.preventDefault()
+    const teamId = teamPortfolio?.team?.id || myTeamChallenges.find((item) => item.id === detail?.id)?.team_id
+    if (!token || !detail || !teamId) return
+    const price = Number(tradeForm.price)
+    const quantity = Number(tradeForm.quantity)
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(quantity) || quantity <= 0) {
+      alert(language === 'zh' ? '价格和数量必须为正数' : 'Price and quantity must be positive')
+      return
+    }
+    setBusy(true)
+    try {
+      const symbol = fixedSymbolForChallenge(detail) || tradeForm.symbol.trim()
+      const res = await fetch(`${API_BASE}/challenges/${detail.challenge_key}/teams/${teamId}/trade`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          side: tradeForm.side,
+          symbol: symbol || undefined,
+          price,
+          quantity,
+          content: tradeForm.content.trim() || undefined
+        })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'team_trade_failed')
+      setTeamPortfolio(data)
+      setTradeForm((current) => ({ ...current, price: '', quantity: '', content: '' }))
+      await loadDetail()
+    } catch (err: any) {
+      alert(err?.message || (language === 'zh' ? '团队交易失败' : 'Team trade failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleTeamSubmit = async (e: FormEvent) => {
+    e.preventDefault()
+    const teamId = teamPortfolio?.team?.id || myTeamChallenges.find((item) => item.id === detail?.id)?.team_id
+    if (!token || !detail || !teamId || !teamSubmissionContent.trim()) return
+    setBusy(true)
+    try {
+      const res = await fetch(`${API_BASE}/challenges/${detail.challenge_key}/teams/${teamId}/submissions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          submission_type: 'team_thesis',
+          content: teamSubmissionContent
+        })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'team_submit_failed')
+      setTeamSubmissionContent('')
+      await loadDetail()
+    } catch (err: any) {
+      alert(err?.message || (language === 'zh' ? '团队提交失败' : 'Team submission failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleTeamSubmissionVote = async (submissionId: number, vote: string) => {
+    if (!token || !detail) return
+    setBusy(true)
+    try {
+      const res = await fetch(`${API_BASE}/challenges/${detail.challenge_key}/submissions/${submissionId}/vote`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ vote })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'team_vote_failed')
+      await loadDetail()
+    } catch (err: any) {
+      alert(err?.message || (language === 'zh' ? '团队投票失败' : 'Team vote failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   if (loading) {
     return <div className="loading"><div className="spinner"></div></div>
   }
 
   if (challengeKey && detail) {
+    const mode = detail.mode || 'individual'
+    const supportsTeams = mode === 'team' || mode === 'hybrid'
+    const isTeamOnly = mode === 'team'
+    const myTeam = myTeamChallenges.find((item) => item.id === detail.id)
     const isJoined = joinedChallengeIds.has(detail.id) || (detail.participants || []).some((item: any) => myChallenges.some((mine) => mine.id === item.challenge_id))
     const lockedSymbol = fixedSymbolForChallenge(detail)
     const portfolio = challengePortfolio?.portfolio || null
+    const teamLivePortfolio = teamPortfolio?.portfolio || null
     const positions = Array.isArray(portfolio?.positions) ? portfolio.positions : []
     const trades = Array.isArray(challengePortfolio?.trades) ? challengePortfolio.trades.slice(-6).reverse() : []
+    const teamPositions = Array.isArray(teamLivePortfolio?.positions) ? teamLivePortfolio.positions : []
+    const teamTrades = Array.isArray(teamPortfolio?.trades) ? teamPortfolio.trades.slice(-6).reverse() : []
 
     return (
       <div className="challenge-page">
@@ -364,6 +577,7 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
           <div>
             <div className="challenge-kicker">
               <span>{detail.status}</span>
+              <span>{mode}</span>
               <span>{detail.scoring_method}</span>
               <span>{marketLabel(detail.market, language)}</span>
             </div>
@@ -371,7 +585,7 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
             {detail.description && <p className="challenge-copy">{detail.description}</p>}
           </div>
           <div className="challenge-hero-actions">
-            {token && detail.status !== 'settled' && detail.status !== 'canceled' && (
+            {token && !isTeamOnly && detail.status !== 'settled' && detail.status !== 'canceled' && (
               <button
                 type="button"
                 className="btn btn-primary"
@@ -395,6 +609,10 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
           <div>
             <span>{language === 'zh' ? '参赛者' : 'Participants'}</span>
             <strong>{detail.participant_count || 0}</strong>
+          </div>
+          <div>
+            <span>{language === 'zh' ? '团队' : 'Teams'}</span>
+            <strong>{detail.team_count || teams.length || 0}</strong>
           </div>
           <div>
             <span>{language === 'zh' ? '初始资金' : 'Initial capital'}</span>
@@ -460,6 +678,7 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
             <div className="challenge-rule-stack">
               <div><span>{language === 'zh' ? '标的' : 'Symbol'}</span><strong>{detail.symbol || 'all'}</strong></div>
               <div><span>{language === 'zh' ? '类型' : 'Type'}</span><strong>{detail.challenge_type}</strong></div>
+              <div><span>{language === 'zh' ? '模式' : 'Mode'}</span><strong>{mode}</strong></div>
               <div><span>{language === 'zh' ? '评分' : 'Scoring'}</span><strong>{detail.scoring_method}</strong></div>
               <div><span>{language === 'zh' ? '最大回撤参数' : 'Drawdown setting'}</span><strong>{formatPct(detail.max_drawdown_pct)}</strong></div>
             </div>
@@ -467,7 +686,208 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
           </aside>
         </div>
 
-        {token && isJoined && (
+        {supportsTeams && (
+          <section className="challenge-panel">
+            <div className="challenge-section-header">
+              <h2>{language === 'zh' ? '团队赛' : 'Team Competition'}</h2>
+              <span className="challenge-badge">{myTeam?.team_name || (language === 'zh' ? '未加入团队' : 'No team joined')}</span>
+            </div>
+            {token && !myTeam && detail.status !== 'settled' && detail.status !== 'canceled' && (
+              <form className="challenge-create-grid challenge-team-form" onSubmit={handleCreateTeam}>
+                <input
+                  className="form-input"
+                  value={teamForm.name}
+                  onChange={(event) => setTeamForm({ ...teamForm, name: event.target.value })}
+                  placeholder={language === 'zh' ? '团队名称' : 'Team name'}
+                  required
+                />
+                <input
+                  className="form-input"
+                  value={teamForm.team_key}
+                  onChange={(event) => setTeamForm({ ...teamForm, team_key: event.target.value })}
+                  placeholder="team-key"
+                />
+                <button className="btn btn-primary" disabled={busy} type="submit">
+                  {language === 'zh' ? '创建团队' : 'Create team'}
+                </button>
+              </form>
+            )}
+            {teams.length === 0 ? (
+              <div className="empty-state challenge-empty-compact">
+                <div className="empty-title">{language === 'zh' ? '暂无团队' : 'No teams yet'}</div>
+              </div>
+            ) : (
+              <div className="challenge-team-list">
+                {teams.map((team) => (
+                  <div key={team.id} className="challenge-team-row">
+                    <div>
+                      <strong>{team.name}</strong>
+                      <span>{team.team_key} · {language === 'zh' ? '成员' : 'Members'} {team.member_count || team.members?.length || 0}</span>
+                    </div>
+                    {token && !myTeam && detail.status !== 'settled' && detail.status !== 'canceled' && (
+                      <button className="btn btn-secondary" disabled={busy} onClick={() => handleJoinTeam(team.id)}>
+                        {language === 'zh' ? '加入团队' : 'Join team'}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {teamLeaderboard.length > 0 && (
+              <div className="challenge-leaderboard challenge-team-leaderboard">
+                <div className="challenge-rank-row challenge-rank-header" aria-hidden="true">
+                  <span>{language === 'zh' ? '排名' : 'Rank'}</span>
+                  <span>{language === 'zh' ? '团队' : 'Team'}</span>
+                  <span>{language === 'zh' ? '收益' : 'Return'}</span>
+                  <span>{language === 'zh' ? '最大回撤' : 'Max DD'}</span>
+                  <span>{language === 'zh' ? '成员' : 'Members'}</span>
+                  <span>{language === 'zh' ? '交易数' : 'Trades'}</span>
+                </div>
+                {teamLeaderboard.map((row) => (
+                  <div key={`${row.team_id}-${row.rank || 'team'}`} className={`challenge-rank-row ${row.disqualified_reason ? 'disqualified' : ''}`}>
+                    <span className="challenge-rank-number">{row.rank ? `#${row.rank}` : 'DQ'}</span>
+                    <span>{row.team_name || row.team_key}</span>
+                    <span className={(row.return_pct || 0) >= 0 ? 'challenge-positive' : 'challenge-negative'}>{formatPct(row.return_pct)}</span>
+                    <span>{formatPct(row.max_drawdown)}</span>
+                    <span>{row.member_count || 0}</span>
+                    <span>{row.trade_count || 0}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {token && myTeam && (
+          <div className={`challenge-trading-grid ${detail.status !== 'active' ? 'challenge-trading-grid-single' : ''}`}>
+            {detail.status === 'active' && (
+              <section className="challenge-panel">
+                <div className="challenge-section-header">
+                  <h2>{language === 'zh' ? '团队交易' : 'Team Trade'}</h2>
+                  <span className="challenge-badge">{myTeam.team_name}</span>
+                </div>
+                <form className="challenge-trade-form" onSubmit={handleTeamTrade}>
+                  <label className="challenge-field">
+                    <span>{language === 'zh' ? '方向' : 'Side'}</span>
+                    <select className="form-input" value={tradeForm.side} onChange={(event) => setTradeForm({ ...tradeForm, side: event.target.value })}>
+                      <option value="buy">{language === 'zh' ? '买入' : 'Buy'}</option>
+                      <option value="sell">{language === 'zh' ? '卖出' : 'Sell'}</option>
+                      {detail.market !== 'polymarket' && (
+                        <>
+                          <option value="short">{language === 'zh' ? '做空' : 'Short'}</option>
+                          <option value="cover">{language === 'zh' ? '平空' : 'Cover'}</option>
+                        </>
+                      )}
+                    </select>
+                  </label>
+                  <label className="challenge-field">
+                    <span>Symbol</span>
+                    <input
+                      className="form-input"
+                      value={lockedSymbol || tradeForm.symbol}
+                      disabled={Boolean(lockedSymbol)}
+                      onChange={(event) => setTradeForm({ ...tradeForm, symbol: detail.market === 'polymarket' ? event.target.value : event.target.value.toUpperCase() })}
+                      placeholder={defaultTradeSymbolForChallenge(detail) || 'symbol'}
+                    />
+                  </label>
+                  <label className="challenge-field">
+                    <span>{language === 'zh' ? '价格' : 'Price'}</span>
+                    <input className="form-input" type="number" step="any" min="0" value={tradeForm.price} onChange={(event) => setTradeForm({ ...tradeForm, price: event.target.value })} required />
+                  </label>
+                  <label className="challenge-field">
+                    <span>{language === 'zh' ? '数量' : 'Quantity'}</span>
+                    <input className="form-input" type="number" step="any" min="0" value={tradeForm.quantity} onChange={(event) => setTradeForm({ ...tradeForm, quantity: event.target.value })} required />
+                  </label>
+                  <textarea className="form-textarea challenge-trade-note" value={tradeForm.content} onChange={(event) => setTradeForm({ ...tradeForm, content: event.target.value })} placeholder={language === 'zh' ? '团队交易备注' : 'Team trade note'} />
+                  <button className="btn btn-primary" disabled={busy} type="submit">{language === 'zh' ? '提交团队交易' : 'Submit team trade'}</button>
+                </form>
+              </section>
+            )}
+            <section className="challenge-panel challenge-portfolio-panel">
+              <div className="challenge-section-header">
+                <h2>{language === 'zh' ? '团队持仓' : 'Team Portfolio'}</h2>
+                <span className="challenge-badge">{teamLivePortfolio?.disqualified_reason || (language === 'zh' ? '团队' : 'Team')}</span>
+              </div>
+              <div className="challenge-portfolio-grid">
+                <div><span>{language === 'zh' ? '现金' : 'Cash'}</span><strong>{formatMoney(teamLivePortfolio?.cash)}</strong></div>
+                <div><span>{language === 'zh' ? '净值' : 'Value'}</span><strong>{formatMoney(teamLivePortfolio?.ending_value)}</strong></div>
+                <div><span>{language === 'zh' ? '收益' : 'Return'}</span><strong className={(teamLivePortfolio?.return_pct || 0) >= 0 ? 'challenge-positive' : 'challenge-negative'}>{formatPct(teamLivePortfolio?.return_pct)}</strong></div>
+                <div><span>{language === 'zh' ? '最大回撤' : 'Max DD'}</span><strong>{formatPct(teamLivePortfolio?.max_drawdown)}</strong></div>
+                <div><span>{language === 'zh' ? '交易数' : 'Trades'}</span><strong>{teamLivePortfolio?.trade_count || 0}</strong></div>
+              </div>
+              <div className="challenge-position-list">
+                <h3>{language === 'zh' ? '团队持仓' : 'Team Positions'}</h3>
+                {teamPositions.length === 0 ? (
+                  <div className="empty-state challenge-empty-compact"><div className="empty-title">{language === 'zh' ? '暂无持仓' : 'No positions'}</div></div>
+                ) : (
+                  teamPositions.map((position: any) => (
+                    <div key={`${position.market}-${position.symbol}-${position.token_id || ''}`} className="challenge-position-row">
+                      <span>{position.symbol}</span>
+                      <span>{position.outcome || position.side || 'long'}</span>
+                      <strong>{Number(position.quantity || 0).toLocaleString()}</strong>
+                    </div>
+                  ))
+                )}
+              </div>
+              {teamTrades.length > 0 && (
+                <div className="challenge-position-list">
+                  <h3>{language === 'zh' ? '团队最近交易' : 'Recent Team Trades'}</h3>
+                  {teamTrades.map((trade: any) => (
+                    <div key={trade.id} className="challenge-position-row">
+                      <span>{trade.side} {trade.symbol}</span>
+                      <span>{formatMoney(trade.price)}</span>
+                      <strong>{Number(trade.quantity || 0).toLocaleString()}</strong>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <form className="challenge-submit-form" onSubmit={handleTeamSubmit}>
+                <textarea className="form-textarea" value={teamSubmissionContent} onChange={(event) => setTeamSubmissionContent(event.target.value)} placeholder={language === 'zh' ? '提交团队 thesis、proposal 或复盘' : 'Submit team thesis, proposal, or review'} required />
+                <button className="btn btn-secondary" disabled={busy} type="submit">{language === 'zh' ? '提交团队观点' : 'Submit team note'}</button>
+              </form>
+              {teamSubmissions.length === 0 ? (
+                <div className="empty-state challenge-empty-compact">
+                  <div className="empty-title">{language === 'zh' ? '暂无团队提交' : 'No team submissions'}</div>
+                </div>
+              ) : (
+                <div className="challenge-submission-list challenge-team-submission-list">
+                  {teamSubmissions.map((submission) => (
+                    <article key={submission.id} className="challenge-submission-item challenge-team-submission-item">
+                      <div className="challenge-submission-heading">
+                        <strong>
+                          <AgentName name={submission.agent_name} verified={isVerifiedAgent(submission, 'agent')} />
+                        </strong>
+                        <span>{submission.submission_type}</span>
+                        <time>{formatDate(submission.created_at, language)}</time>
+                      </div>
+                      <p>{submission.content}</p>
+                      <div className="challenge-vote-row">
+                        {['approve', 'reject', 'revise'].map((vote) => (
+                          <button
+                            key={vote}
+                            type="button"
+                            className={`btn btn-ghost challenge-vote-button ${submission.my_vote === vote ? 'active' : ''}`}
+                            disabled={busy}
+                            onClick={() => handleTeamSubmissionVote(submission.id, vote)}
+                          >
+                            {vote === 'approve'
+                              ? `${language === 'zh' ? '通过' : 'Approve'} ${submission.approve_count || 0}`
+                              : vote === 'reject'
+                                ? `${language === 'zh' ? '反对' : 'Reject'} ${submission.reject_count || 0}`
+                                : `${language === 'zh' ? '修改' : 'Revise'} ${submission.revise_count || 0}`}
+                          </button>
+                        ))}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+
+        {token && isJoined && !isTeamOnly && (
           <div className={`challenge-trading-grid ${detail.status !== 'active' ? 'challenge-trading-grid-single' : ''}`}>
             {detail.status === 'active' && (
               <section className="challenge-panel">
@@ -717,6 +1137,15 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
             />
             <select
               className="form-input"
+              value={createForm.mode}
+              onChange={(event) => setCreateForm({ ...createForm, mode: event.target.value })}
+            >
+              {challengeModeValues.map((mode) => (
+                <option key={mode} value={mode}>{mode}</option>
+              ))}
+            </select>
+            <select
+              className="form-input"
               value={createForm.scoring_method}
               onChange={(event) => setCreateForm({ ...createForm, scoring_method: event.target.value })}
             >
@@ -766,11 +1195,14 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
         <div className="challenge-list">
           {challenges.map((challenge) => {
             const isJoined = joinedChallengeIds.has(challenge.id)
+            const teamJoined = myTeamChallenges.some((item) => item.id === challenge.id)
+            const isTeamOnly = (challenge.mode || 'individual') === 'team'
             return (
               <article key={challenge.id} className="challenge-list-item">
                 <div>
                   <div className="challenge-kicker">
                     <span>{challenge.status}</span>
+                    <span>{challenge.mode || 'individual'}</span>
                     <span>{challenge.scoring_method}</span>
                     <span>{marketLabel(challenge.market, language)} {challenge.symbol || 'all'}</span>
                   </div>
@@ -779,12 +1211,13 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
                   </Link>
                   <div className="challenge-list-meta">
                     <span>{language === 'zh' ? '参赛' : 'Participants'} {challenge.participant_count || 0}</span>
+                    <span>{language === 'zh' ? '团队' : 'Teams'} {challenge.team_count || 0}</span>
                     <span>{language === 'zh' ? '结束' : 'Ends'} {formatDate(challenge.end_at, language)}</span>
                     <span>{formatMoney(challenge.initial_capital)}</span>
                   </div>
                 </div>
                 <div className="challenge-list-actions">
-                  {token && challenge.status !== 'settled' && challenge.status !== 'canceled' && (
+                  {token && !isTeamOnly && challenge.status !== 'settled' && challenge.status !== 'canceled' && (
                     <button
                       className="btn btn-secondary"
                       disabled={busy || isJoined}
@@ -792,6 +1225,9 @@ export function ChallengePage({ token, canAdmin = false }: ChallengePageProps) {
                     >
                       {isJoined ? (language === 'zh' ? '已加入' : 'Joined') : (language === 'zh' ? '加入' : 'Join')}
                     </button>
+                  )}
+                  {token && isTeamOnly && teamJoined && (
+                    <span className="challenge-badge">{language === 'zh' ? '已入队' : 'Team joined'}</span>
                   )}
                   <Link className="btn btn-ghost" to={`/challenges/${challenge.challenge_key}`}>
                     {language === 'zh' ? '查看' : 'Open'}

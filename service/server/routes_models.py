@@ -91,6 +91,7 @@ class ChallengeCreateRequest(BaseModel):
     market: str
     symbol: Optional[str] = None
     challenge_type: str = "multi-agent"
+    mode: str = "individual"
     status: Optional[str] = None
     scoring_method: str = "return-only"
     initial_capital: float = 100000.0
@@ -123,6 +124,30 @@ class ChallengeTradeRequest(BaseModel):
     quantity: float
     content: Optional[str] = None
     executed_at: Optional[str] = None
+
+
+class ChallengeTeamCreateRequest(BaseModel):
+    team_key: Optional[str] = None
+    name: str
+    role: Optional[str] = "captain"
+    variant_key: Optional[str] = None
+    starting_cash: Optional[float] = None
+
+
+class ChallengeTeamJoinRequest(BaseModel):
+    role: Optional[str] = "member"
+    variant_key: Optional[str] = None
+
+
+class ChallengeTeamSubmissionRequest(BaseModel):
+    submission_type: str = "team_thesis"
+    content: Optional[str] = None
+    prediction_json: Optional[Dict[str, Any]] = None
+
+
+class ChallengeSubmissionVoteRequest(BaseModel):
+    vote: str
+    content: Optional[str] = None
 
 
 class ChallengeSettleRequest(BaseModel):

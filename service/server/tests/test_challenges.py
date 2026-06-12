@@ -16,10 +16,19 @@ import database
 from challenges import (
     ChallengeError,
     create_challenge_trade,
+    create_challenge_submission_vote,
+    create_challenge_team,
+    create_challenge_team_submission,
+    create_challenge_team_trade,
     get_agent_challenge_portfolio,
     get_challenge_leaderboard,
+    get_challenge_team_leaderboard,
+    get_challenge_team_portfolio,
+    get_challenge_team_submissions,
     create_challenge,
     join_challenge,
+    join_challenge_team,
+    list_challenge_teams,
     list_challenges,
     settle_challenge,
     settle_due_challenges,
@@ -119,6 +128,129 @@ class ChallengeTests(unittest.TestCase):
         cursor.execute("SELECT event_type FROM experiment_events ORDER BY id")
         self.assertIn("challenge_created", [row["event_type"] for row in cursor.fetchall()])
         conn.close()
+
+    def test_team_challenge_creates_team_portfolio_and_leaderboard(self):
+        challenge = self._create_active_challenge(
+            challenge_key="team-challenge",
+            mode="team",
+            rules_json={"team_size_max": 3},
+        )
+        self.assertEqual(challenge["mode"], "team")
+
+        with self.assertRaises(ChallengeError):
+            join_challenge(challenge["challenge_key"], self.agent_2)
+
+        created = create_challenge_team(
+            challenge["challenge_key"],
+            self.agent_2,
+            {"team_key": "alpha", "name": "Alpha Team"},
+        )
+        team_id = created["team"]["id"]
+        self.assertEqual(created["team"]["team_key"], "alpha")
+        self.assertEqual(len(created["team"]["members"]), 1)
+
+        joined = join_challenge_team(challenge["challenge_key"], team_id, self.agent_3, {"role": "risk"})
+        self.assertTrue(joined["joined"])
+        self.assertEqual(len(joined["team"]["members"]), 2)
+
+        with patch("price_fetcher.get_price_from_market", return_value=100.0):
+            trade_result = create_challenge_team_trade(
+                challenge["challenge_key"],
+                team_id,
+                self.agent_2,
+                {
+                    "symbol": "BTC",
+                    "side": "buy",
+                    "price": 1.0,
+                    "quantity": 5.0,
+                    "executed_at": iso(datetime.now(timezone.utc)),
+                    "content": "team entry",
+                },
+            )
+
+        self.assertEqual(trade_result["trade"]["agent_id"], self.agent_2)
+        self.assertEqual(trade_result["portfolio"]["trade_count"], 1)
+        self.assertAlmostEqual(trade_result["portfolio"]["cash"], 500.0)
+
+        with patch("price_fetcher.get_price_from_market", return_value=120.0):
+            portfolio = get_challenge_team_portfolio(challenge["challenge_key"], team_id, self.agent_3)
+            leaderboard = get_challenge_team_leaderboard(challenge["challenge_key"])
+
+        self.assertAlmostEqual(portfolio["portfolio"]["ending_value"], 1100.0)
+        self.assertAlmostEqual(portfolio["portfolio"]["return_pct"], 10.0)
+        self.assertTrue(portfolio["portfolio"]["marked_to_market"])
+        self.assertEqual(leaderboard["leaderboard"][0]["team_id"], team_id)
+        self.assertEqual(leaderboard["leaderboard"][0]["rank"], 1)
+        self.assertEqual(leaderboard["leaderboard"][0]["member_count"], 2)
+
+        teams = list_challenge_teams(challenge["challenge_key"])
+        self.assertEqual(teams["total"], 1)
+        self.assertEqual(teams["teams"][0]["member_count"], 2)
+
+        conn = database.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS count FROM positions WHERE agent_id IN (?, ?)", (self.agent_2, self.agent_3))
+        self.assertEqual(cursor.fetchone()["count"], 0)
+        cursor.execute("SELECT event_type FROM experiment_events")
+        event_types = {row["event_type"] for row in cursor.fetchall()}
+        self.assertTrue({
+            "challenge_team_created",
+            "challenge_team_joined",
+            "challenge_team_trade_submitted",
+            "challenge_team_submission_created",
+        }.issubset(event_types))
+        conn.close()
+
+    def test_team_challenge_size_submission_vote_and_hybrid_personal_join(self):
+        challenge = self._create_active_challenge(
+            challenge_key="team-size",
+            mode="team",
+            rules_json={"team_size_max": 2},
+        )
+        created = create_challenge_team(
+            challenge["challenge_key"],
+            self.agent_1,
+            {"team_key": "beta", "name": "Beta Team"},
+        )
+        team_id = created["team"]["id"]
+        join_challenge_team(challenge["challenge_key"], team_id, self.agent_2)
+        with self.assertRaises(ChallengeError):
+            join_challenge_team(challenge["challenge_key"], team_id, self.agent_3)
+
+        submission = create_challenge_team_submission(
+            challenge["challenge_key"],
+            team_id,
+            self.agent_1,
+            {"submission_type": "trade_proposal", "content": "Buy BTC if momentum confirms."},
+        )
+        vote = create_challenge_submission_vote(
+            challenge["challenge_key"],
+            submission["submission"]["id"],
+            self.agent_2,
+            {"vote": "approve", "content": "Risk looks acceptable."},
+        )
+        self.assertEqual(vote["vote"]["vote"], "approve")
+        listed = get_challenge_team_submissions(
+            challenge["challenge_key"],
+            team_id,
+            viewer_agent_id=self.agent_2,
+        )
+        self.assertEqual(listed["total"], 1)
+        self.assertEqual(listed["submissions"][0]["id"], submission["submission"]["id"])
+        self.assertEqual(listed["submissions"][0]["approve_count"], 1)
+        self.assertEqual(listed["submissions"][0]["reject_count"], 0)
+        self.assertEqual(listed["submissions"][0]["revise_count"], 0)
+        self.assertEqual(listed["submissions"][0]["my_vote"], "approve")
+
+        hybrid = self._create_active_challenge(challenge_key="hybrid-challenge", mode="hybrid")
+        personal = join_challenge(hybrid["challenge_key"], self.agent_2)
+        self.assertTrue(personal["joined"])
+        hybrid_team = create_challenge_team(
+            hybrid["challenge_key"],
+            self.agent_3,
+            {"team_key": "gamma", "name": "Gamma Team"},
+        )
+        self.assertEqual(hybrid_team["team"]["team_key"], "gamma")
 
     def test_challenges_are_filtered_by_track(self):
         self._create_active_challenge(challenge_key="track-crypto", market="crypto", symbol="BTC")
@@ -321,6 +453,24 @@ class ChallengeTests(unittest.TestCase):
         self.assertEqual(marked_row["trade_count"], 1)
         self.assertTrue(marked_row["metrics"]["marked_to_market"])
         self.assertEqual(marked_row["metrics"]["live_marks"][0]["price"], 90.0)
+
+    def test_zero_trade_participants_do_not_rank_above_traders(self):
+        challenge = self._create_active_challenge(challenge_key="zero-trade-unranked")
+        join_challenge(challenge["challenge_key"], self.agent_2)
+        join_challenge(challenge["challenge_key"], self.agent_3)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "buy", 100.0, 10.0)
+        self._submit_challenge_trade(challenge["challenge_key"], self.agent_2, "sell", 90.0, 10.0)
+
+        result = get_challenge_leaderboard(challenge["challenge_key"])
+        trader = next(row for row in result["leaderboard"] if row["agent_id"] == self.agent_2)
+        inactive = next(row for row in result["leaderboard"] if row["agent_id"] == self.agent_3)
+
+        self.assertEqual(result["leaderboard"][0]["agent_id"], self.agent_2)
+        self.assertEqual(trader["rank"], 1)
+        self.assertLess(trader["return_pct"], 0)
+        self.assertIsNone(inactive["rank"])
+        self.assertIsNone(inactive["final_score"])
+        self.assertEqual(inactive["trade_count"], 0)
 
     def test_active_leaderboard_ignores_stale_results_and_marks_to_market(self):
         challenge = self._create_active_challenge(challenge_key="live-mark-stale-results")
